@@ -9,6 +9,9 @@
 #   3. /etc/mctomqtt/config.d/99-user.toml (local overrides, loaded last)
 #
 # Put your customizations in /etc/mctomqtt/config.d/99-user.toml
+# Config may contain broker passwords. Stage config directories as root:service
+# group 0750 and all base/preset/user TOML as 0640, for serial as well as BLE.
+# Never put private keys, tokens or BLE pairing passkeys in these files.
 #
 # The --config flag bypasses default loading entirely. Multiple --config flags
 # are supported; files are loaded in order, each overlaying the previous.
@@ -24,6 +27,14 @@ log_level = "INFO"
 # Wait for system clock sync (via timedatectl) before setting repeater time
 sync_time = true
 
+# Device transport. Keep "serial" for the upstream USB behavior. BLE is opt-in
+# and never falls back automatically to a serial port or another BLE device.
+# This general.transport value is canonical for connection/watchdog/logging.
+# Legacy top-level transport is used only if this key is absent from merged
+# config. Both supplied values must be exactly "serial" or "ble"; invalid values
+# fail, even if shadowed. A valid canonical value wins over a valid legacy value.
+transport = "serial"
+
 [serial]
 # Serial ports to try connecting to (first successful port is used)
 ports = ["/dev/ttyACM0"]
@@ -36,6 +47,25 @@ timeout = 2
 
 # Watchdog: seconds with no data before forcing serial reconnect (0 to disable)
 watchdog_timeout = 900
+
+# Set transport = "ble" above to enable the custom SenseCAP observer service.
+# The BlueZ device must already be paired and trusted; do not record passkeys,
+# private keys, or broker tokens in this file.
+# The adapter checks the BlueZ backend's bond/trust properties (Bleak 3.0.2);
+# missing/unverified state is rejected, not overridden by this configuration.
+# Requires the 16-byte session/sequence protocol and separate ACK/stats GATT
+# characteristics. ACK means RAM reassembly, not MQTT delivery; no durable replay.
+# Same-record offset-zero retries replace partial bytes; only completion is ACKed.
+# A stopped owner loop is not open; unresolved backend connection state blocks
+# reopening a second link. There is no timeout/security bypass configuration.
+# Session-history retirement uses automatic reconnect; no operator restart setting.
+# The separate BLE systemd template retries clean unavailable-startup exits with
+# Restart=always; explicit supervisor stop uses SIGTERM without auto-restart.
+# Installed-unit retry/stop and real BlueZ permissions remain untested here.
+[ble]
+# address = "REPLACE_WITH_CONFIRMED_BONDED_BLE_ADDRESS"
+# service_uuid = "10c25d4a-3c61-50a3-5e48-566b026f5f1b"
+# watchdog_timeout = 900
 
 [topics]
 # Topic templates - supported variables: {IATA}, {PUBLIC_KEY}

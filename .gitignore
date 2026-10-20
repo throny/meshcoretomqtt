@@ -9,6 +9,7 @@ venv/
 .DS_Store
 .claude/settings.local.json
 uv.lock
+!uv.lock
 .codex
 .codex/
 .pytest_cache/

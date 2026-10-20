@@ -17,6 +17,40 @@ One way of tracking a message through the mesh is filtering the MQTT data on the
 `hash` field when the source log format includes it. Dispatcher/serial packet
 logs include `hash=...`, while current repeater packet logs may not.
 
+## Optional BLE repeater observer (experimental)
+
+USB serial remains the default. An opt-in `general.transport = "ble"` adapter
+supports the custom BLE repeater-observer protocol, **not** the Companion BLE
+protocol or stock repeater firmware. Initial hardware validation covers a
+SenseCAP Solar / P1-Pro repeater and a Linux BlueZ host; other repeater boards,
+Bluetooth adapters and host platforms are unvalidated and may need a port.
+
+See `config.toml.example` for explicit BLE peer selection and per-broker region
+settings, and validate the exact configuration before running it:
+
+```sh
+python3 preflight_config.py --config /path/to/observer-config.toml
+python3 mctomqtt.py --config /path/to/observer-config.toml
+```
+
+The peer must already be bonded/trusted through the firmware's physical
+operator-authorized enrollment flow. No automatic scanning, pairing, firmware
+flashing, secret-key provisioning, or service installation is performed by the
+adapter. Private-key material used for broker signing stays in process memory.
+The inherited serial installer/unit is not a turnkey BLE deployment; review
+permissions, isolated configuration and rollback before enabling a BLE service.
+
+Complete records are ACKed after bounded host RAM reassembly, **not** MQTT
+receipt. BLE and MQTT loss/failure counters remain separate; there is no durable
+MQTT replay guarantee. Full power/RF, security/interruption and unattended field
+acceptance remain outside the short initial hardware checks.
+
+Standalone bridge tests report firmware-dependent C++ wire checks as skipped
+when no firmware tree is present. For cross-layer validation set
+`OBSERVER_SOURCE` to the exact reviewed, patched firmware checkout; an explicit
+invalid source fails rather than skipping. The whole-stack candidate workflow
+supplies that source and runs these checks.
+
 ## Quick Install
 
 ### One-Line Installation (Recommended)

@@ -410,21 +410,21 @@ def set_permissions(install_dir: str, config_dir: str, svc_user: str) -> None:
     chown_recursive(install_dir, svc_user, svc_user)
     print_success(f"{install_dir} owned by {svc_user}:{svc_user}")
 
-    # /etc/mctomqtt owned by root:svc_user, mode 755 (world-readable)
+    # Config may contain broker credentials: only root and the service group.
     chown_recursive(config_dir, "root", svc_user)
-    os.chmod(config_dir, 0o755)
+    os.chmod(config_dir, 0o750)
     config_d = Path(config_dir) / "config.d"
     if config_d.exists():
-        os.chmod(str(config_d), 0o755)
+        os.chmod(str(config_d), 0o750)
 
     config_toml = Path(config_dir) / "config.toml"
     if config_toml.exists():
-        os.chmod(str(config_toml), 0o644)
+        os.chmod(str(config_toml), 0o640)
 
     for override in config_d.glob("*.toml") if config_d.exists() else []:
-        os.chmod(str(override), 0o644)
+        os.chmod(str(override), 0o640)
 
-    print_success(f"Permissions set on {config_dir} (root:{svc_user}, 755/644)")
+    print_success(f"Permissions set on {config_dir} (root:{svc_user}, 750/640)")
 
 
 # ---------------------------------------------------------------------------
@@ -933,7 +933,7 @@ def create_venv(install_dir: str, svc_user: str) -> None:
     if not os.environ.get("INSTALL_REBUILD_VENV"):
         try:
             result = run_cmd(
-                [venv_python, "-c", "import serial, paho.mqtt.client, ed25519_orlp"],
+                [venv_python, "-c", "import serial, paho.mqtt.client, ed25519_orlp, bleak"],
                 check=False, capture=True,
             )
             if result.returncode == 0:
@@ -966,8 +966,8 @@ def create_venv(install_dir: str, svc_user: str) -> None:
 
     print_info("Installing Python dependencies...")
     run_cmd([f"{venv_dir}/bin/pip", "install", "--quiet", "--upgrade", "pip"])
-    run_cmd([f"{venv_dir}/bin/pip", "install", "--quiet", "pyserial", "paho-mqtt", "ed25519-orlp"])
-    print_success("Python dependencies installed (pyserial, paho-mqtt, ed25519-orlp)")
+    run_cmd([f"{venv_dir}/bin/pip", "install", "--quiet", "pyserial", "paho-mqtt", "ed25519-orlp", "bleak>=0.22"])
+    print_success("Python dependencies installed (pyserial, paho-mqtt, ed25519-orlp, bleak)")
 
 
 # ---------------------------------------------------------------------------

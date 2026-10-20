@@ -106,14 +106,32 @@ def load_config(config_paths: list[str] | None = None) -> dict[str, Any]:
     return config
 
 
+def resolve_transport(config: dict[str, Any]) -> str:
+    """Validate device transport; general.transport wins over the legacy key."""
+    general = config.get('general', {})
+    if not isinstance(general, dict):
+        raise ValueError("general must be a TOML table")
+    for table, name in ((general, 'general.transport'), (config, 'transport')):
+        if 'transport' in table and table['transport'] not in ('serial', 'ble'):
+            # Report only the field, never echo potentially sensitive bad input.
+            raise ValueError(f"{name} must be 'serial' or 'ble'")
+    return general.get('transport', config.get('transport', 'serial'))
+
+
 def log_config_sources(config: dict[str, Any]) -> None:
     """Log configuration summary."""
+    transport = resolve_transport(config)
     general = config.get('general', {})
     brokers = config.get('broker', [])
     serial_cfg = config.get('serial', {})
+    ble_cfg = config.get('ble', {})
 
     logger.info(f"IATA: {general.get('iata', 'XXX')}")
-    logger.info(f"Serial ports: {serial_cfg.get('ports', ['/dev/ttyACM0'])}")
+    logger.info(f"Transport: {transport}")
+    if transport == 'serial':
+        logger.info(f"Serial ports: {serial_cfg.get('ports', ['/dev/ttyACM0'])}")
+    elif transport == 'ble':
+        logger.info("BLE observer address configured: %s", bool(ble_cfg.get('address')))
     logger.info(f"Brokers configured: {len(brokers)}")
 
     for i, broker in enumerate(brokers):

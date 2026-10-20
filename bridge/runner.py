@@ -10,9 +10,10 @@ import time
 from time import sleep
 from typing import Any, TYPE_CHECKING
 
-from config_loader import log_config_sources
+from config_loader import log_config_sources, resolve_transport
 
 from . import serial_connection
+from . import ble_connection
 from . import message_parser
 from . import background
 from .auth_provider import MeshCoreAuthProvider
@@ -22,6 +23,32 @@ if TYPE_CHECKING:
     from .state import BridgeState
 
 logger = logging.getLogger(__name__)
+
+
+def process_device_line(state: BridgeState) -> bool:
+    """Pass one accepted classic line to the unchanged parser."""
+    line = state.device.read_line()
+    if not line:
+        return False
+    if getattr(state.device, "record_gap_before_line", False):
+        state.last_raw = None
+    # BLE also carries key replies; never dump its unclassified stream to logs.
+    if not isinstance(state.device, ble_connection.BleConnection):
+        logger.debug(f"RX: {line}")
+    message_parser.parse_and_publish(state, line)
+    return True
+
+
+def connect_transport(config: dict[str, Any]):
+    """Connect the explicitly selected device transport; serial is the default."""
+    try:
+        transport = resolve_transport(config)
+    except ValueError as exc:
+        logger.error("Invalid transport configuration: %s", exc)
+        return None
+    if transport == 'serial':
+        return serial_connection.connect(config)
+    return ble_connection.connect(config)
 
 
 def load_client_version(version: str) -> str:
@@ -80,8 +107,8 @@ def run(state: BridgeState) -> None:
     """Main orchestration: connect serial, query device, connect MQTT, read loop."""
     log_config_sources(state.config)
 
-    # Connect serial
-    state.device = serial_connection.connect(state.config)
+    # Connect selected transport (serial remains the backwards-compatible default).
+    state.device = connect_transport(state.config)
     if not state.device:
         return
 
@@ -172,9 +199,11 @@ def run(state: BridgeState) -> None:
     stats_thread.start()
     logger.debug("[STATS] Started statistics logging thread")
 
-    # Serial watchdog: force reconnect if no data received for this many seconds
-    serial_cfg = state.config.get('serial', {})
-    watchdog_timeout = serial_cfg.get('watchdog_timeout', 900)
+    # Watchdog: force reconnect if no data received for this many seconds.
+    transport_name = resolve_transport(state.config)
+    transport_label = "BLE" if transport_name == "ble" else "Serial"
+    transport_cfg = state.config.get(transport_name, {})
+    watchdog_timeout = transport_cfg.get('watchdog_timeout', 900)
     watchdog_logged = False
     last_reconnect_attempt = 0.0
     reconnect_interval = 5  # seconds between retry attempts
@@ -189,24 +218,27 @@ def run(state: BridgeState) -> None:
 
             try:
                 if state.device:
-                    line = state.device.read_line()
-                    if line:
-                        logger.debug(f"RX: {line}")
-                        message_parser.parse_and_publish(state, line)
+                    if not state.device.is_open:
+                        logger.warning("Device transport disconnected, reconnecting")
+                        state.device.close()
+                        state.device = connect_transport(state.config)
+                        sleep(0.5)
+                        continue
+                    if process_device_line(state):
                         watchdog_logged = False
 
                     # Watchdog: detect silently dead serial connections
                     elif state.device.seconds_since_activity() > watchdog_timeout:
                         if not watchdog_logged:
                             logger.warning(
-                                f"Serial watchdog: no data received for "
+                                f"{transport_label} watchdog: no data received for "
                                 f"{int(state.device.seconds_since_activity())}s "
                                 f"(threshold: {watchdog_timeout}s), forcing reconnect"
                             )
                         state.device.close()
-                        state.device = serial_connection.connect(state.config)
+                        state.device = connect_transport(state.config)
                         if state.device:
-                            logger.info("Serial watchdog: reconnected successfully")
+                            logger.info("%s watchdog: reconnected successfully", transport_label)
                             watchdog_logged = False
                         else:
                             watchdog_logged = True
@@ -216,20 +248,20 @@ def run(state: BridgeState) -> None:
                     now = time.time()
                     if now - last_reconnect_attempt >= reconnect_interval:
                         last_reconnect_attempt = now
-                        state.device = serial_connection.connect(state.config)
+                        state.device = connect_transport(state.config)
                         if state.device:
-                            logger.info("Serial reconnected successfully")
+                            logger.info("%s reconnected successfully", transport_label)
                             watchdog_logged = False
                         else:
                             if not watchdog_logged:
-                                logger.warning("Serial device unavailable, retrying every %ds", reconnect_interval)
+                                logger.warning("%s device unavailable, retrying every %ds", transport_label, reconnect_interval)
                                 watchdog_logged = True
 
             except OSError:
-                logger.warning("Serial connection unavailable, trying to reconnect")
+                logger.warning("%s connection unavailable, trying to reconnect", transport_label)
                 if state.device:
                     state.device.close()
-                state.device = serial_connection.connect(state.config)
+                state.device = connect_transport(state.config)
                 sleep(0.5)
 
             sleep(0.01)
