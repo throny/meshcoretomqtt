@@ -34,7 +34,7 @@ python3 mctomqtt.py --config /path/to/observer-config.toml
 ```
 
 The peer must already be bonded/trusted through the firmware's physical
-operator-authorized enrollment flow. No automatic scanning, pairing, firmware
+operator-authorized enrollment flow. No automatic peer selection, pairing, firmware
 flashing, secret-key provisioning, or service installation is performed by the
 adapter. Private-key material used for broker signing stays in process memory.
 The inherited serial installer/unit is not a turnkey BLE deployment; review
