@@ -558,9 +558,9 @@ class TestTomlDumpsRoundTrip:
         assert result["s"]["a_str_arr"] == ["x", "y"]
 
     def test_escapes_strings_with_special_characters(self) -> None:
-        source = '[s]\npath = "C:\\\\fixture-user\\\\example"\nquote = "she said \\"hi\\""\n'
+        source = '[s]\npath = "C:\\\\Users\\\\example"\nquote = "she said \\"hi\\""\n'
         result = self._roundtrip(source)
-        assert result["s"]["path"] == "C:\\fixture-user\\example"
+        assert result["s"]["path"] == "C:\\Users\\example"
         assert result["s"]["quote"] == 'she said "hi"'
 
     def test_preserves_array_of_tables_order(self) -> None:

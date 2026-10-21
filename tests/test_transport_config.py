@@ -6,7 +6,8 @@ import pytest
 
 from bridge import ble_connection, runner
 from config_loader import load_config, log_config_sources
-from tests.fakes import FakeSerialConnection, make_test_state
+from tests.fakes import CallbackBrokerClient, FakeSerialConnection, make_test_state, make_config
+from bridge.mqtt_manager import MqttManager
 from test_ble_connection import FakeGatt, close_ble_connections_after_test
 
 ROOT = Path(__file__).parents[1]
@@ -28,7 +29,7 @@ def documented_ble_config(tmp_path):
     return load_config([str(path)])
 
 
-def test_documented_toml_opens_real_ble_connection_with_fake_gatt(documented_ble_config, monkeypatch):
+def test_documented_toml_opens_real_ble_connection_with_fake_gatt(documented_ble_config):
     fake = FakeGatt()
     addresses = []
 
@@ -36,9 +37,11 @@ def test_documented_toml_opens_real_ble_connection_with_fake_gatt(documented_ble
         addresses.append(address)
         return fake
 
-    monkeypatch.setattr(ble_connection, "BleakClient", client)
-    monkeypatch.setattr(runner.serial_connection, "connect", lambda _config: pytest.fail("serial I/O forbidden"))
-    connection = runner.connect_transport(documented_ble_config)
+    connection = runner.connect_transport(
+        documented_ble_config,
+        serial_factory=lambda _: pytest.fail("serial I/O forbidden"),
+        ble_factory=lambda config: ble_connection.connect(config, client_factory=client),
+    )
     try:
         assert isinstance(connection, ble_connection.BleConnection)
         assert connection.is_open and fake.is_connected
@@ -55,15 +58,16 @@ def test_documented_toml_opens_real_ble_connection_with_fake_gatt(documented_ble
     ('transport = "serial"\n[general]\ntransport = "ble"\n', "ble"),
     ('transport = "ble"\n[general]\ntransport = "serial"\n', "serial"),
 ])
-def test_toml_selection_and_summary_agree_with_canonical_precedence(tmp_path, monkeypatch, caplog, toml, expected):
+def test_toml_selection_and_summary_agree_with_canonical_precedence(tmp_path, caplog, toml, expected):
     path = tmp_path / "config.toml"
     path.write_text(toml + '\n[ble]\naddress = "02:00:00:00:00:01"\n')
     config = load_config([str(path)])
     fake = FakeGatt()
     serial = FakeSerialConnection()
-    monkeypatch.setattr(ble_connection, "BleakClient", lambda _address: fake)
-    monkeypatch.setattr(runner.serial_connection, "connect", lambda _config: serial)
-    connection = runner.connect_transport(config)
+    connection = runner.connect_transport(
+        config, serial_factory=lambda _: serial,
+        ble_factory=lambda cfg: ble_connection.connect(cfg, client_factory=lambda _: fake),
+    )
     try:
         if expected == "ble":
             assert isinstance(connection, ble_connection.BleConnection)
@@ -93,7 +97,7 @@ def test_toml_selection_and_summary_agree_with_canonical_precedence(tmp_path, mo
     'transport = "auto"\n[general]\ntransport = "ble"',
     'transport = "ble"\n[general]\ntransport = false',
 ])
-def test_invalid_transport_never_calls_either_device_factory(tmp_path, monkeypatch, caplog, toml):
+def test_invalid_transport_never_calls_either_device_factory(tmp_path, caplog, toml):
     path = tmp_path / "invalid.toml"
     path.write_text(toml)
     config = load_config([str(path)])
@@ -101,23 +105,30 @@ def test_invalid_transport_never_calls_either_device_factory(tmp_path, monkeypat
     def forbidden(_config):
         pytest.fail("invalid config reached device I/O")
 
-    monkeypatch.setattr(runner.serial_connection, "connect", forbidden)
-    monkeypatch.setattr(runner.ble_connection, "connect", forbidden)
     with caplog.at_level(logging.ERROR):
-        assert runner.connect_transport(config) is None
+        assert runner.connect_transport(config, serial_factory=forbidden, ble_factory=forbidden) is None
     assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
-def test_runner_watchdog_uses_canonical_ble_timeout_and_reconnect(tmp_path, documented_ble_config, monkeypatch, caplog):
+def test_runner_watchdog_uses_canonical_ble_timeout_and_reconnect(tmp_path, documented_ble_config, caplog):
     # Load both actual TOML layers. Even a conflicting legacy key must not make
     # the watchdog read serial's 900-second timeout instead of BLE's 7 seconds.
     legacy = tmp_path / "legacy.toml"
     legacy.write_text('transport = "serial"\n')
     config = load_config([str(tmp_path / "documented-ble.toml"), str(legacy)])
+    config["broker"] = make_config()["broker"]
     state = make_test_state(config=config)
     devices = []
 
     class IdleTransport(FakeSerialConnection):
+        reads = 0
+
+        def read_line(self):
+            self.reads += 1
+            if self.reads >= 2:
+                runner.handle_signal(state, 15, None)
+            return None
+
         def seconds_since_activity(self):
             return 10
 
@@ -128,23 +139,16 @@ def test_runner_watchdog_uses_canonical_ble_timeout_and_reconnect(tmp_path, docu
             state.should_exit = True
         return device
 
-    class OfflineManager:
-        iterations = 0
+    state.mqtt_manager = MqttManager(state, client_factory=CallbackBrokerClient)
 
-        def connect_all_brokers(self):
-            return True
+    def factory(config):
+        return runner.connect_transport(
+            config, ble_factory=connect_ble,
+            serial_factory=lambda _: pytest.fail("serial I/O forbidden"),
+        )
 
-        def reconnect_disconnected_brokers(self):
-            self.iterations += 1
-            # Bound the test even when the watchdog fails to reconnect.
-            if self.iterations >= 2:
-                state.should_exit = True
-
-    state.mqtt_manager = OfflineManager()
-    monkeypatch.setattr(runner.ble_connection, "connect", connect_ble)
-    monkeypatch.setattr(runner.serial_connection, "connect", lambda _config: pytest.fail("serial I/O forbidden"))
     with caplog.at_level(logging.INFO):
-        runner.run(state)
+        runner.run(state, transport_factory=factory)
     assert len(devices) == 2
     assert all(not device.is_open for device in devices)
     assert "BLE watchdog: no data received for 10s (threshold: 7s), forcing reconnect" in caplog.text

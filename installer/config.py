@@ -1002,7 +1002,7 @@ def configure_custom_broker(broker_num: int, config_dir: str) -> None:
 # Configure MQTT brokers (main flow)
 # ---------------------------------------------------------------------------
 
-def configure_mqtt_brokers(ctx: InstallerContext) -> None:
+def configure_mqtt_brokers(ctx: InstallerContext, *, change_owner=None) -> None:
     """Interactive MQTT broker configuration flow."""
     user_toml_path = migrate_user_config_filename(ctx.config_dir)
     user_toml = str(user_toml_path)
@@ -1080,7 +1080,8 @@ def configure_mqtt_brokers(ctx: InstallerContext) -> None:
     # Fix ownership after writing config
     if platform.system() != "Darwin" and ctx.svc_user:
         import shutil as _shutil
-        _shutil.chown(user_toml, "root", ctx.svc_user)
+        owner = _shutil.chown if change_owner is None else change_owner
+        owner(user_toml, "root", ctx.svc_user)
         os.chmod(user_toml, 0o640)
 
 

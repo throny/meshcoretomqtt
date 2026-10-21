@@ -18,12 +18,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-if __name__ == "__main__":
+def main(argv=None, *, bridge_factory=None) -> None:
+    """CLI orchestration with explicit application construction for embedding/tests."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
     parser.add_argument("--config", action="append", default=None,
                         help="Path to TOML config file (can be specified multiple times; overrides default config loading)")
-    args: argparse.Namespace = parser.parse_args()
+    args: argparse.Namespace = parser.parse_args(argv)
 
     # Load config
     config = load_config(args.config)
@@ -36,10 +37,15 @@ if __name__ == "__main__":
     logger.setLevel(log_level)
     logging.getLogger().setLevel(log_level)
 
-    bridge = MeshCoreBridge(config, debug=args.debug, version=__version__)
+    factory = MeshCoreBridge if bridge_factory is None else bridge_factory
+    bridge = factory(config, debug=args.debug, version=__version__)
 
     # Ensure signals from systemd (SIGTERM) and ctrl-c (SIGINT) are handled
     signal.signal(signal.SIGTERM, bridge.handle_signal)
     signal.signal(signal.SIGINT, bridge.handle_signal)
 
     bridge.run()
+
+
+if __name__ == "__main__":
+    main()

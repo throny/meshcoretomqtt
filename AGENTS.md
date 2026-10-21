@@ -16,7 +16,7 @@ python3 mctomqtt.py --config config.toml.example          # requires pyserial an
 python3 mctomqtt.py --config config.toml.example --debug    # enables DEBUG-level logging
 ```
 
-**Python dependencies:** `pyserial`, `paho-mqtt`, `ed25519-orlp` (install via pip or venv). Requires Python 3.11+ for `tomllib` stdlib. Note: `ed25519-orlp` may require a C toolchain and Python headers on Linux if a pre-compiled wheel is unavailable.
+**Python dependencies:** `pyserial`, `paho-mqtt`, `ed25519-orlp`, and `bleak>=0.22` (install via pip or venv). Requires Python 3.11+ for `tomllib` stdlib. BLE use also requires a functioning BlueZ system service on Linux. Note: `ed25519-orlp` may require a C toolchain and Python headers on Linux if a pre-compiled wheel is unavailable.
 
 **Docker:**
 ```bash
@@ -38,6 +38,7 @@ The runtime codebase is a `bridge/` Python package with a thin entry point (proj
 
 - **`bridge/`** — Python package containing all application logic, split into focused modules:
   - **`serial_connection.py`** — `SerialConnection` ABC + `RealSerialConnection` (device I/O with internal locking) + `connect()` factory
+  - **`ble_connection.py`** — Bonded observer transport: 16-byte `<QIHH` framing, dedicated complete-record ACK/stats characteristics, bounded process-memory dedup across reconnects; GATT writes serialize independently of command-reply waits. Firmware counters live in `observer_firmware`, host counters in `observer_host`; MQTT failures remain independent. `runner.process_device_line()` clears pending RAW only at transport discontinuities, leaving the classic parser unchanged. Unit tests do not certify hardware; other boards and host platforms remain unvalidated.
   - **`auth_provider.py`** — `AuthProvider` ABC + `MeshCoreAuthProvider` (wraps `auth_token.py`)
   - **`broker_client.py`** — `BrokerClient` ABC + `PahoBrokerClient` (wraps paho-mqtt)
   - **`state.py`** — `BridgeState` shared mutable state container (all ~30 instance variables)
@@ -106,10 +107,22 @@ See `config.toml.example` for the full reference with all options and defaults.
 - **Thread safety:** Serial port access is protected by internal locking in `RealSerialConnection`. The main loop, stats thread, and remote serial handler all call methods on the `SerialConnection` ABC — the lock is never exposed to callers.
 - **MQTT auth:** Two modes per broker — username/password or JWT auth tokens (generated from device's Ed25519 private key). Tokens are cached with TTL. Auth operations go through the `AuthProvider` ABC.
 - **Graceful shutdown:** SIGTERM/SIGINT handlers set `state.should_exit = True`. The main loop checks this flag each iteration.
+- **BLE unit restart:** `systemd/meshcoretomqtt-ble.service` uses `Restart=always` because unavailable startup currently returns exit 0; explicit supervisor stop suppresses restart and uses SIGTERM. Offline process/policy tests do not prove installed-unit enforcement. Do not change shared USB runner semantics to satisfy the unit.
+- **Reproducible dependencies:** Keep `uv.lock` tracked and consistent with `pyproject.toml` (`uv lock --check`); clean CI uses `uv sync --system-certs --frozen --extra test`, never an untracked local lock/venv.
+- **BLE session retirement:** Keep the active nonce/high-water mark across reconnects. Retired sessions are bounded (63 plus active) and age out only at a fresh validated connection boundary, with old callbacks generation-fenced. Exhaustion within a live generation requests the normal runner reconnect, not a process restart. Firmware sequence 1 after exhaustion requires a fresh nonce; `observer_firmware.unavailable_records/bytes` counts rejected admission while waiting for entropy, separately from host/MQTT loss.
 - **Config access:** `state.config` dict with `state.config.get('section', {}).get('key', default)`. Broker configs accessed via `topics.get_broker_config(state, broker_idx)`.
+- **Device transport selection:** Use `config_loader.resolve_transport()` everywhere (startup/reconnect, watchdog, summary). Canonical `[general].transport` wins; legacy top-level `transport` applies only if canonical is absent from merged config; neither means serial. Validate both supplied keys as exact `serial`/`ble` strings, including shadowed legacy values; no invalid-value/device-failure fallback. Broker TCP/WebSocket transport is a separate setting.
+- **Bleak BlueZ security properties:** With the public BleakClient wrapper, Device1 properties live on `client._backend._device_info` (observed with Bleak 3.0.2), not `client._device_info`. Direct backend factories remain supported. Require literal `Paired is True` and `Trusted is True`; malformed/missing backend state must not fall back to wrapper attributes. This uses a version-sensitive private backend field; validate the installed version in a separately approved hardware session.
+- **BLE partial-record retries:** A valid offset-zero frame with the same nonce, sequence and total length replaces all partial bytes, without counting a whole-record loss. ACK/dedup happen only after complete ordered reassembly. Do not splice attempts or allow nonzero reordering/duplicates or a same-record length change.
+- **BLE record ceiling:** Host `MAX_RECORD_BYTES` is 544 bytes including terminator, matching the observer firmware's `kMaximumRecordBytes`, `RecordQueue::kMaxRecordLength` and transport `LineBuffer` capacity. Change these together for a coordinated firmware/host baseline; verify the exact source and provenance of a matching image, never infer compatibility from the constant alone.
+- **BLE teardown state:** `is_open` requires a running owner loop as well as the backend connection flag. Bounded teardown can leave cached `is_connected=true`; report the transport unusable but preserve the raw flag and refuse a second link until the backend reports disconnection. Do not fabricate physical disconnect or extend command timeouts to hide this state.
+- **Runner startup cleanup:** `run()` owns one cleanup scope around startup and the main loop, including failed device getters, initialization exceptions and exhausted initial MQTT retries. The stats thread may not have started when cleanup runs. Do not restore an early-return path that bypasses device closure; retain real-runner/fake-GATT regression coverage. Stop requests between initial MQTT attempts must not schedule another attempt.
 - **Version:** `__version__` is defined at the top of `mctomqtt.py`. The `.version_info` JSON file (created by installer) appends git hash info. Version is passed to `MeshCoreBridge(config, debug, version)`.
 - **Dependency injection:** All external dependencies (serial, MQTT, auth) are abstracted behind ABCs. Tests inject fakes via `make_test_state()` from `tests/fakes.py`.
+- **I/O construction:** `MeshCoreBridge` accepts optional `transport_factory` and `broker_client_factory`; `MqttManager` accepts a `client_factory`. `runner.run` accepts a transport factory and startup-wait callable. Defaults use the real transports, Paho client and original retry timings. Tests pass fakes explicitly rather than patching modules or freezing the global clock; no runtime configuration selects arbitrary Python callables.
 - **Installer file operations:** Since the installer runs as root, use Python stdlib directly — `os.makedirs()`, `shutil.copy2()`, `os.chmod()`, `shutil.chown()`, `Path.write_text()`, `shutil.rmtree()`, `Path.unlink()`. Never shell out for file operations. Reserve `run_cmd()` for external tools with no Python equivalent (systemctl, docker, useradd, pip, etc.). All subprocess commands use list form (never `shell=True`).
+- **Config permissions:** `set_permissions()` repairs config/config.d to `0750` and base/preset/user TOML to `0640`, root:service-group; broker reconfiguration must not widen overrides back to world-readable. Preserve the inherited serial app ownership/executable behavior. BLE preparation separately requires root-owned, non-service-writable code/venv; permission-helper tests do not approve a complete BLE installation.
+- **Observer preflight:** `preflight_config.py` validates one explicit BLE config before the separate preparation-only observer unit. Enabled broker auth must use the runtime-supported `none`/`password`/`token` methods; password credentials and token audience are required when selected, and TLS option types must be booleans. It does not prove TLS policy, broker reachability, production mapping, or receipt. The active `meshcoretomqtt-ble.service` has no pre-start validator and uses default shared config; do not imply the separate preflight unit guards it.
 
 ## Development Guidelines
 
@@ -129,9 +142,14 @@ See `config.toml.example` for the full reference with all options and defaults.
 **PR CI:** `.github/workflows/pr-tests.yaml` runs on `pull_request` and executes `python -m pytest tests/ -m "not e2e"` on Ubuntu. This includes the default unit tests plus any network/system tests that are functional in the GitHub runner, while still excluding opt-in e2e coverage that needs real services or devices.
 
 **Conventions:**
+- Cross-layer wire checks accept `OBSERVER_SOURCE` pointing to the exact patched
+  firmware source. An explicitly invalid source fails; a standalone bridge
+  checkout without firmware headers reports those checks as skipped. Whole-stack
+  candidate CI supplies the validated source so the checks remain mandatory there.
 - Test files mirror the module they test (e.g., `test_validation.py` tests `installer/config.py` validation helpers).
 - Installer flow tests (`test_install_flow.py`, `test_update_flow.py`, `test_migrate_flow.py`) use `unittest.mock.patch` to stub interactive prompts and subprocess calls.
 - Shell script syntax is validated via `bash -n` in `test_bash_bootstrap.py`.
+- `test_ble_packaging.py` uses temporary roots and maps deployment ownership names to the unprivileged caller at the OS boundary while executing real chown/chmod/stat. It checks exact root/unit-service identity requests, not real inter-account access. `tests/helpers/offline_service.py` is test-only: real entrypoint/runner and SIGTERM in a fresh unprivileged subprocess, fake device/broker I/O, socket/device/subprocess audit guard. Do not invoke installers, systemctl, create system accounts or contact Bluetooth/MQTT for these offline tests.
 
 ## Deployment
 

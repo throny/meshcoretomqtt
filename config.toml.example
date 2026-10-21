@@ -61,6 +61,8 @@ watchdog_timeout = 900
 # Session-history retirement uses automatic reconnect; no operator restart setting.
 # The separate BLE systemd template retries clean unavailable-startup exits with
 # Restart=always; explicit supervisor stop uses SIGTERM without auto-restart.
+# Failed startup (including exhausted MQTT retries) closes the device before
+# return. This is resource cleanup, not durable offline MQTT storage/replay.
 # Installed-unit retry/stop and real BlueZ permissions remain untested here.
 [ble]
 # address = "REPLACE_WITH_CONFIRMED_BONDED_BLE_ADDRESS"

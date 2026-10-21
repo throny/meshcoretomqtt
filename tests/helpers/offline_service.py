@@ -4,8 +4,8 @@ No production hook, installer, account, Bluetooth stack, broker or service manag
 """
 from pathlib import Path
 import os
-import runpy
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -23,8 +23,9 @@ def deny_external_io(event, args):
 sys.addaudithook(deny_external_io)
 
 from bridge import runner
-import bridge
-from tests.fakes import FakeSerialConnection, FakeBrokerClient
+from bridge import MeshCoreBridge
+from mctomqtt import main
+from tests.fakes import FakeSerialConnection, CallbackBrokerClient
 
 config_path, events_path = sys.argv[1:]
 events = Path(events_path)
@@ -51,7 +52,7 @@ class OfflineTransport(FakeSerialConnection):
         record("transport-closed")
 
 
-class OfflineBroker(FakeBrokerClient):
+class OfflineBroker(CallbackBrokerClient):
     def publish(self, topic, payload, qos=0, retain=False):
         import json
         if json.loads(payload).get("status") == "offline":
@@ -64,23 +65,6 @@ class OfflineBroker(FakeBrokerClient):
     def disconnect(self):
         super().disconnect()
         record("broker-disconnected")
-
-
-class OfflineManager:
-    def __init__(self, state):
-        self.state = state
-
-    def connect_all_brokers(self):
-        self.state.mqtt_connected = True
-        self.state.token_cache[0] = {"token": "SENTINEL-token-not-for-logs"}
-        self.state.mqtt_clients = [{"client": OfflineBroker(), "broker_idx": 0, "connected": True}]
-        return True
-
-    def reconnect_disconnected_brokers(self):
-        pass
-
-    def stop_websocket_ping_thread(self, broker_idx):
-        pass
 
 
 if os.getuid() == 0:
@@ -99,9 +83,15 @@ def forbid_serial(config):
     raise RuntimeError("serial transport forbidden in BLE lifecycle fixture")
 
 
-runner.ble_connection.connect = connect_ble
-runner.serial_connection.connect = forbid_serial
-bridge.MqttManager = OfflineManager
-sys.argv = [str(ROOT / "mctomqtt.py"), "--debug", "--config", config_path]
-runpy.run_path(str(ROOT / "mctomqtt.py"), run_name="__main__")
+def construct_bridge(config, debug, version):
+    def transport_factory(config):
+        return runner.connect_transport(config, serial_factory=forbid_serial, ble_factory=connect_ble)
+
+    app = MeshCoreBridge(config, debug=debug, version=version,
+                         transport_factory=transport_factory, broker_client_factory=OfflineBroker)
+    app.state.token_cache[0] = ("SENTINEL-token-not-for-logs", time.time())
+    return app
+
+
+main(["--debug", "--config", config_path], bridge_factory=construct_bridge)
 record("exited")

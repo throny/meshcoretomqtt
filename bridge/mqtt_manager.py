@@ -7,7 +7,7 @@ import random
 import socket as _socket
 import threading
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from . import topics
 from . import remote_serial
@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 class MqttManager:
     """Orchestrates multiple MQTT broker connections."""
 
-    def __init__(self, state: BridgeState) -> None:
+    def __init__(self, state: BridgeState, *, client_factory: Callable[..., BrokerClient] | None = None) -> None:
         self.state = state
+        self._client_factory = client_factory
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -385,7 +386,8 @@ class MqttManager:
         if tls_enabled and not tls_verify:
             logger.warning(f"[{broker_name}] TLS verification disabled")
 
-        broker_client = PahoBrokerClient(
+        factory = PahoBrokerClient if self._client_factory is None else self._client_factory
+        broker_client = factory(
             client_id=client_id,
             transport=transport,
             username=username if username else None,

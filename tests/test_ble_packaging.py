@@ -404,12 +404,13 @@ def test_sigterm_cleanup_and_transport_reopen_without_services(caplog):
 
 
 @pytest.fixture
-def staged_identity(tmp_path, monkeypatch):
+def staged_identity(tmp_path):
     # Resolve deployment principals at the OS boundary to this unprivileged
     # fixture's real uid/gid. Do not suppress chown: apply it to every real file,
     # and separately verify the exact requested production principals/paths.
+    if not sys.platform.startswith("linux") or os.getuid() == 0:
+        pytest.skip("requires an unprivileged Linux filesystem fixture")
     uid, gid = os.getuid(), os.getgid()
-    assert uid != 0, "this fixture must not run with host root privileges"
     svc = service()["Service"]
     assert svc["User"] == svc["Group"] == "mctomqtt"
     changes = []
@@ -421,8 +422,7 @@ def staged_identity(tmp_path, monkeypatch):
         changes.append((Path(path), user, group))
         real_chown(path, uid, gid)
 
-    monkeypatch.setattr(shutil, "chown", fixture_chown)
-    return svc, uid, gid, changes
+    return svc, uid, gid, changes, fixture_chown
 
 
 @pytest.mark.parametrize("transport", ["serial", "ble"])
@@ -430,7 +430,7 @@ def test_staged_config_is_private_and_uses_unit_service_identity(tmp_path, stage
     from config_loader import load_config
     from installer import system
 
-    svc, uid, gid, changes = staged_identity
+    svc, uid, gid, changes, change_owner = staged_identity
     install = tmp_path / "opt/mctomqtt"
     config = tmp_path / "etc/mctomqtt"
     install.mkdir(parents=True)
@@ -446,7 +446,7 @@ def test_staged_config_is_private_and_uses_unit_service_identity(tmp_path, stage
         path.chmod(0o666)  # upgrades must repair old unsafe modes too
     contents = {path: path.read_bytes() for path in files}
 
-    system.set_permissions(str(install), str(config), svc["User"])
+    system.set_permissions(str(install), str(config), svc["User"], change_owner=change_owner)
 
     for path in (config, config / "config.d"):
         assert path.stat().st_mode & 0o777 == 0o750
@@ -464,7 +464,7 @@ def test_staged_config_is_private_and_uses_unit_service_identity(tmp_path, stage
 def test_broker_config_edit_does_not_reopen_private_override(tmp_path, staged_identity, monkeypatch):
     from installer import InstallerContext, config
 
-    svc, uid, gid, changes = staged_identity
+    svc, uid, gid, changes, change_owner = staged_identity
     config_dir = tmp_path / "etc/mctomqtt"
     config_d = config_dir / "config.d"
     config_d.mkdir(parents=True)
@@ -474,7 +474,8 @@ def test_broker_config_edit_does_not_reopen_private_override(tmp_path, staged_id
     # Existing config + immediate Finish exercises only local file operations:
     # no discovery, broker preset downloads, serial detection or installer CLI.
     monkeypatch.setattr(config, "prompt_input", lambda *_args: "5")
-    config.configure_mqtt_brokers(InstallerContext(config_dir=str(config_dir), svc_user=svc["User"]))
+    config.configure_mqtt_brokers(InstallerContext(config_dir=str(config_dir), svc_user=svc["User"]),
+                                  change_owner=change_owner)
     assert secret.stat().st_mode & 0o777 == 0o640
     assert (secret.stat().st_uid, secret.stat().st_gid) == (uid, gid)
     assert (secret, "root", svc["Group"]) in changes
@@ -482,7 +483,8 @@ def test_broker_config_edit_does_not_reopen_private_override(tmp_path, staged_id
 
 def test_entrypoint_sigterm_restart_cleans_up_and_redacts_output(tmp_path):
     """Run real entrypoint/runner in two fresh unprivileged child processes."""
-    assert os.getuid() != 0, "lifecycle fixture must not run as host root"
+    if os.name != "posix" or os.getuid() == 0:
+        pytest.skip("requires an unprivileged POSIX subprocess fixture")
     config = tmp_path / "fixture.toml"
     config.write_text('''[general]
 transport = "ble"
@@ -545,6 +547,8 @@ password = "SENTINEL-password-not-for-logs"
 
 
 def test_startup_unavailable_clean_exit_is_covered_by_unit_restart_policy(tmp_path):
+    if os.name != "posix" or os.getuid() == 0:
+        pytest.skip("requires an unprivileged POSIX subprocess fixture")
     config = tmp_path / "unavailable.toml"
     config.write_text('[general]\ntransport = "ble"\nsync_time = false\n')
     events = tmp_path / "events"

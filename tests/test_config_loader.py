@@ -10,37 +10,6 @@ import pytest
 from config_loader import load_config
 
 
-def test_ble_dependencies_are_declared_in_all_runtime_installers() -> None:
-    root = Path(__file__).parents[1]
-    pyproject = (root / "pyproject.toml").read_text()
-    installer = (root / "installer/system.py").read_text()
-    dockerfile = (root / "Dockerfile").read_text()
-    nix_package = (root / "nix/packages.nix").read_text()
-    nix_shell = (root / "nix/shell.nix").read_text()
-
-    assert "bleak" in pyproject.lower()
-    assert "bleak>=0.22" in installer
-    assert "bleak>=0.22" in dockerfile
-    assert "bleak" in nix_package
-    assert "bleak" in nix_shell
-
-
-def test_installer_venv_dependency_command_includes_bleak(monkeypatch, tmp_path):
-    import installer.system as installer_system
-
-    calls = []
-    monkeypatch.setattr(installer_system, "run_cmd", lambda cmd, **kwargs: calls.append(cmd) or type("Result", (), {"returncode": 0})())
-    monkeypatch.setattr(installer_system, "install_os_build_deps", lambda: None)
-    monkeypatch.setattr(installer_system.shutil, "rmtree", lambda *args, **kwargs: None)
-    monkeypatch.setattr(installer_system.shutil, "chown", lambda *args, **kwargs: None)
-    monkeypatch.setattr(installer_system, "print_success", lambda *_: None)
-    monkeypatch.setattr(installer_system, "print_info", lambda *_: None)
-    monkeypatch.setenv("INSTALL_REBUILD_VENV", "1")
-
-    installer_system.create_venv(str(tmp_path), "")
-    assert any("bleak>=0.22" in command for command in calls)
-
-
 class TestLoadConfigWithExplicitPaths:
     def test_single_config_file(self, tmp_path: Path) -> None:
         """A single --config file is loaded as the full config."""

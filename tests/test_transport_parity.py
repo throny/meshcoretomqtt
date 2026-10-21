@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from unittest.mock import patch
+from datetime import datetime, timezone, timedelta
 
 from bridge.ble_connection import BleConnection
 from bridge.message_parser import parse_and_publish
@@ -19,7 +18,20 @@ from test_ble_connection import FakeGatt, frame
 from test_ble_connection import _connections, close_ble_connections_after_test
 
 
+def canonical_publications(messages, before, after):
+    """Compare invariant payloads while validating real, unfrozen UTC stamps."""
+    result = []
+    for topic, payload, qos, retain in messages:
+        message = json.loads(payload)
+        stamp = datetime.fromisoformat(message.pop("timestamp"))
+        assert stamp.utcoffset() == timedelta(0)
+        assert before <= stamp <= after
+        result.append((topic, message, qos, retain))
+    return result
+
+
 def test_ble_carried_classic_raw_rx_tx_fixtures_publish_the_same_payloads_and_origin():
+    before = datetime.now(timezone.utc)
     broker = FakeBrokerClient()
     state = make_test_state(broker_clients=[{"client": broker, "broker_idx": 0, "connected": True}])
     state.repeater_name = "SenseCAP"
@@ -33,17 +45,11 @@ def test_ble_carried_classic_raw_rx_tx_fixtures_publish_the_same_payloads_and_or
         b"12:00:00 - 1/1/2026 U: RX, len=2 (type=1, route=D, payload_len=0) SNR=4 RSSI=-90 score=100 time=2 hash=ABCD [02 -> 01]\n",
         b"12:00:01 - 1/1/2026 U: TX, len=2 (type=1, route=F, payload_len=0) [02 -> 01]\n",
     ]
-    class FrozenDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 10, 14, 12, 0, 0, tzinfo=tz or timezone.utc)
-
-    with patch("bridge.message_parser.datetime", FrozenDateTime):
-        for record_id, line in enumerate(classic, 1):
-            fake.emit(frame(record_id, len(line), 0, line))
-            received = connection.read_line()
-            assert received == line.decode().rstrip("\r\n"), connection.metrics
-            parse_and_publish(state, received)
+    for record_id, line in enumerate(classic, 1):
+        fake.emit(frame(record_id, len(line), 0, line))
+        received = connection.read_line()
+        assert received == line.decode().rstrip("\r\n"), connection.metrics
+        parse_and_publish(state, received)
 
     published = [json.loads(item[1]) for item in broker.published]
     assert [payload["direction"] for payload in published] == ["rx", "tx"]
@@ -59,22 +65,17 @@ def test_ble_carried_classic_raw_rx_tx_fixtures_publish_the_same_payloads_and_or
     serial_state = make_test_state(broker_clients=[{"client": serial_broker, "broker_idx": 0, "connected": True}])
     serial_state.repeater_name = "SenseCAP"
     serial_state.repeater_pub_key = "AA" * 32
-    with patch("bridge.message_parser.datetime", FrozenDateTime):
-        for line in classic:
-            parse_and_publish(serial_state, line.decode().strip())
-    assert broker.published == serial_broker.published
+    for line in classic:
+        parse_and_publish(serial_state, line.decode().strip())
+    after = datetime.now(timezone.utc)
+    assert canonical_publications(broker.published, before, after) == canonical_publications(serial_broker.published, before, after)
 
 
 def test_status_topic_data_keeps_iata_and_repeater_identity_for_ble_transport():
-    class FrozenDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 10, 14, 12, 0, 0, tzinfo=tz or timezone.utc)
-
-    def make_status_state(broker):
+    def make_status_state(broker, transport):
         state = make_test_state(
             config={
-                "general": {"iata": "SEA"},
+                "general": {"iata": "SEA", "transport": transport},
                 "topics": {"status": "meshcore/{IATA}/{PUBLIC_KEY}/status"},
             },
             broker_clients=[{"client": broker, "broker_idx": 0, "connected": True}],
@@ -84,11 +85,12 @@ def test_status_topic_data_keeps_iata_and_repeater_identity_for_ble_transport():
         return state
 
     ble_broker, serial_broker = FakeBrokerClient(), FakeBrokerClient()
-    ble_state, serial_state = make_status_state(ble_broker), make_status_state(serial_broker)
-    with patch("bridge.mqtt_publish.datetime", FrozenDateTime):
-        publish_status(ble_state, "online")
-        publish_status(serial_state, "online")
-    assert ble_broker.published == serial_broker.published
+    ble_state, serial_state = make_status_state(ble_broker, "ble"), make_status_state(serial_broker, "serial")
+    before = datetime.now(timezone.utc)
+    publish_status(ble_state, "online")
+    publish_status(serial_state, "online")
+    after = datetime.now(timezone.utc)
+    assert canonical_publications(ble_broker.published, before, after) == canonical_publications(serial_broker.published, before, after)
     assert ble_broker.published[0][0] == "meshcore/SEA/" + "BB" * 32 + "/status"
     assert json.loads(ble_broker.published[0][1])["origin"] == "SenseCAP"
     assert json.loads(ble_broker.published[0][1])["origin_id"] == "BB" * 32
@@ -110,8 +112,7 @@ def test_token_auth_claims_and_audience_flow_matches_existing_host_generator():
     state.client_version = "meshcoretomqtt/test"
     state.auth = MeshCoreAuthProvider()
     manager = MqttManager(state)
-    with patch("bridge.mqtt_manager.time.time", return_value=1776541102):
-        username, token = manager._generate_auth_credentials(0)
+    username, token = manager._generate_auth_credentials(0)
     claims = decode_token_payload(token)
     assert username == f"v1_{state.repeater_pub_key.upper()}"
     assert claims["aud"] == "mqtt-us-v1.letsmesh.net"

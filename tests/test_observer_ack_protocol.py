@@ -20,9 +20,9 @@ RAW = b"12:00:00 - 1/1/2026 U RAW: AABB\n"
 RX = b"12:00:00 - 1/1/2026 U: RX, len=2 (type=1, route=D, payload_len=0) SNR=4 RSSI=-90 score=100 time=2 hash=ABCD [02 -> 01]\n"
 
 
-def _firmware_source_root():
+def _firmware_source_root(fallback_root=None):
     configured = os.environ.get("OBSERVER_SOURCE")
-    root = Path(configured).resolve() if configured else Path(__file__).resolve().parents[3]
+    root = Path(configured).resolve() if configured else (fallback_root or Path(__file__).resolve().parents[3])
     headers = ("ObserverProtocol.h", "ObserverRecordQueue.h", "ObserverTransport.h")
     if not all((root / "src/observer" / name).is_file() for name in headers):
         if configured:
@@ -39,9 +39,8 @@ def test_explicit_firmware_source_requires_observer_headers(monkeypatch, tmp_pat
 
 def test_standalone_bridge_marks_missing_cross_layer_fixture_as_skip(monkeypatch, tmp_path):
     monkeypatch.delenv("OBSERVER_SOURCE", raising=False)
-    monkeypatch.setitem(globals(), "__file__", str(tmp_path / "host/tests/test_wire.py"))
     with pytest.raises(pytest.skip.Exception):
-        _firmware_source_root()
+        _firmware_source_root(fallback_root=tmp_path)
 
 
 def wire(nonce, sequence, data, offset=0, total=None):
@@ -55,13 +54,8 @@ def drain(connection):
     connection._run(settle(), timeout=1)
 
 
-def test_complete_record_ack_exact_bytes_and_lost_ack_replay_single_publish(monkeypatch):
+def test_complete_record_ack_exact_bytes_and_lost_ack_replay_single_publish():
     events = []
-    original_parse = runner.message_parser.parse_and_publish
-    def observed_parse(state, line):
-        events.append(("parse",))
-        return original_parse(state, line)
-    monkeypatch.setattr(runner.message_parser, "parse_and_publish", observed_parse)
     class Gatt(FakeGatt):
         async def write_gatt_char(self, uuid, value, response=True):
             await super().write_gatt_char(uuid, value, response)
@@ -86,8 +80,9 @@ def test_complete_record_ack_exact_bytes_and_lost_ack_replay_single_publish(monk
     fake.emit(wire(0xFEDCBA9876543210, 4294967295, RX))
     drain(connection)
     assert not runner.process_device_line(state)
-    assert events == [("ack", b"ack fedcba9876543210 4294967295"), ("parse",), ("publish",), ("ack", b"ack fedcba9876543210 4294967295")]
+    assert events == [("ack", b"ack fedcba9876543210 4294967295"), ("publish",), ("ack", b"ack fedcba9876543210 4294967295")]
     assert len(broker.published) == 1
+    assert json.loads(broker.published[0][1])["type"] == "PACKET"
     assert connection.metrics["duplicate_records"] == 1
 
 
@@ -276,13 +271,12 @@ def test_over_65_actual_boot_reconnects_never_poison_process_history():
         assert connection.read_line() is None
 
 
-def test_ack_timeout_keeps_record_unexposed_and_retry_can_deliver_once(monkeypatch, caplog):
-    monkeypatch.setattr("bridge.ble_connection.GATT_TIMEOUT", 0.02)
+def test_ack_timeout_keeps_record_unexposed_and_retry_can_deliver_once(caplog):
     class SlowAck(FakeGatt):
         stalled = True
         async def write_gatt_char(self, uuid, value, response=True):
             if self.stalled:
-                await asyncio.Event().wait()
+                raise TimeoutError("synthetic GATT deadline")
             await super().write_gatt_char(uuid, value, response)
     fake = SlowAck()
     connection = make_connection(fake)

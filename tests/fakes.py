@@ -158,6 +158,29 @@ class FakeBrokerClient(BrokerClient):
         return self._connected
 
 
+class CallbackBrokerClient(FakeBrokerClient):
+    """Fake external MQTT I/O with the normal client callback contract."""
+
+    def __init__(self, *, on_connect=None, userdata=None, unavailable=False,
+                 after_connect=None, **unused):
+        super().__init__()
+        self.on_connect = on_connect
+        self.userdata = userdata
+        self.unavailable = unavailable
+        self.after_connect = after_connect
+
+    def connect(self, server, port, keepalive=60):
+        if self.unavailable:
+            raise OSError("synthetic broker unavailable")
+        super().connect(server, port, keepalive)
+
+    def loop_start(self):
+        if self.on_connect:
+            self.on_connect(self, self.userdata, None, 0, None)
+        if self.after_connect:
+            self.after_connect()
+
+
 def make_config(**overrides: Any) -> dict[str, Any]:
     """Factory for minimal valid TOML config dict."""
     config: dict[str, Any] = {

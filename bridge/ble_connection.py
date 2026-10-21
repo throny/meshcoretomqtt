@@ -152,7 +152,7 @@ class BleConnection(SerialConnection):
         self._write_lock = asyncio.Lock()
         self._completion_lock = asyncio.Lock()
         self._retirement_reconnect_required = False
-        if self._client_factory:
+        if self._client_factory is not None:
             return self._client_factory(self.address)
         if BleakClient is None:  # pragma: no cover - requires deliberately missing dependency
             raise RuntimeError("Bleak is required for BLE transport")
@@ -698,14 +698,15 @@ class BleConnection(SerialConnection):
         )
 
 
-def connect(config: dict[str, Any]) -> BleConnection | None:
+def connect(config: dict[str, Any], *, client_factory=None) -> BleConnection | None:
     """Open explicitly configured BLE transport; serial remains the default."""
     ble = config.get("ble", {})
     address = ble.get("address")
     if not address:
         logger.error("BLE transport requires ble.address")
         return None
-    connection = BleConnection(address, service_uuid=ble.get("service_uuid", SERVICE_UUID))
+    connection = BleConnection(address, service_uuid=ble.get("service_uuid", SERVICE_UUID),
+                               client_factory=client_factory)
     try:
         connection.open()
         return connection

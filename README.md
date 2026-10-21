@@ -51,6 +51,22 @@ when no firmware tree is present. For cross-layer validation set
 invalid source fails rather than skipping. The whole-stack candidate workflow
 supplies that source and runs these checks.
 
+### Startup cleanup and contributor conventions
+
+Device cleanup encloses initialization as well as packet processing. Failed
+startup getters, initialization exceptions and exhausted initial MQTT retries
+release the device; stop requests between retries do not start another attempt.
+This is not durable offline delivery or a guarantee against every forced-kill,
+controller or peripheral failure. No automatic Bluetooth reset is performed.
+
+External I/O is supplied through explicit factories for embedding and tests;
+normal CLI defaults, serial selection and network timeouts are unchanged.
+The new BLE tests use injected fakes, real temporary files and real UTC timestamp
+validation rather than global clock/core-module mocks. Permission fixtures use
+an explicit ownership callable with real filesystem operations. Installer
+runtime dependency argv is tested without executing installs or suppressing file
+operations. See `AGENTS.md` for contributor rules and test boundaries.
+
 ## Quick Install
 
 ### One-Line Installation (Recommended)

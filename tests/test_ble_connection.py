@@ -633,13 +633,13 @@ def test_bounds_host_line_queue_and_counts_ble_drops():
     assert connection.metrics["dropped_records"] == 1
 
 
-def test_runner_keeps_serial_default_and_requires_explicit_ble(monkeypatch):
-    monkeypatch.setattr("bridge.runner.serial_connection.connect", lambda config: "serial")
-    monkeypatch.setattr("bridge.runner.ble_connection.connect", lambda config: "ble")
-
-    assert connect_transport({}) == "serial"
-    assert connect_transport({"transport": "ble", "ble": {"address": "AA:BB"}}) == "ble"
-    assert connect_transport({"transport": "auto"}) is None
+def test_runner_keeps_serial_default_and_requires_explicit_ble():
+    from tests.fakes import FakeSerialConnection
+    serial, ble = FakeSerialConnection(), FakeSerialConnection()
+    factories = {"serial_factory": lambda _: serial, "ble_factory": lambda _: ble}
+    assert connect_transport({}, **factories) is serial
+    assert connect_transport({"transport": "ble", "ble": {"address": "02:00:00:00:00:01"}}, **factories) is ble
+    assert connect_transport({"transport": "auto"}, **factories) is None
 
 
 def test_public_private_key_and_stats_methods_match_classic_serial_parsing():
