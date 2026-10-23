@@ -19,6 +19,20 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def clear_ble_process_sessions():
+    try:
+        from bridge.ble_connection import BleConnection
+    except Exception:
+        yield
+        return
+    if hasattr(BleConnection, "_process_sessions"):
+        BleConnection._process_sessions.clear()
+    yield
+    if hasattr(BleConnection, "_process_sessions"):
+        BleConnection._process_sessions.clear()
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     # network and system run by default; set SKIP vars to disable
     # e2e is opt-in; set MCTOMQTT_TEST_E2E=1 to enable
