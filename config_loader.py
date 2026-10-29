@@ -107,15 +107,16 @@ def load_config(config_paths: list[str] | None = None) -> dict[str, Any]:
 
 
 def resolve_transport(config: dict[str, Any]) -> str:
-    """Validate device transport; general.transport wins over the legacy key."""
+    """Select USB serial by default, or the explicitly enabled CoC backend."""
+    if 'transport' in config:
+        raise ValueError("Set general.transport, not a top-level transport key")
     general = config.get('general', {})
     if not isinstance(general, dict):
         raise ValueError("general must be a TOML table")
-    for table, name in ((general, 'general.transport'), (config, 'transport')):
-        if 'transport' in table and table['transport'] not in ('serial', 'ble', 'coc'):
-            # Report only the field, never echo potentially sensitive bad input.
-            raise ValueError(f"{name} must be 'serial', 'ble', or 'coc'")
-    return general.get('transport', config.get('transport', 'serial'))
+    transport = general.get('transport', 'serial')
+    if transport not in ('serial', 'coc'):
+        raise ValueError("general.transport must be 'serial' or 'coc'")
+    return transport
 
 
 def log_config_sources(config: dict[str, Any]) -> None:
@@ -124,14 +125,11 @@ def log_config_sources(config: dict[str, Any]) -> None:
     general = config.get('general', {})
     brokers = config.get('broker', [])
     serial_cfg = config.get('serial', {})
-    ble_cfg = config.get('ble', {})
 
     logger.info(f"IATA: {general.get('iata', 'XXX')}")
     logger.info(f"Transport: {transport}")
     if transport == 'serial':
         logger.info(f"Serial ports: {serial_cfg.get('ports', ['/dev/ttyACM0'])}")
-    elif transport == 'ble':
-        logger.info("BLE observer address configured: %s", bool(ble_cfg.get('address')))
     elif transport == 'coc':
         coc_cfg = config.get('coc', {})
         logger.info("CoC observer peer configured: %s", isinstance(coc_cfg, dict) and bool(coc_cfg.get('address')))

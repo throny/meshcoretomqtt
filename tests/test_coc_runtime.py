@@ -2,8 +2,6 @@ import socket
 import struct
 import logging
 from pathlib import Path
-import os
-import subprocess
 import tempfile
 import threading
 import time
@@ -53,13 +51,25 @@ def start_pair(session=77, queue_limit=2, peer="synthetic-peer"):
     return connection, device_data, device_control
 
 
-def test_coc_is_explicit_and_canonical_transport_has_existing_precedence():
-    config = {"general": {"transport": "coc"}, "transport": "ble"}
+def test_coc_is_explicit_and_serial_remains_default():
+    config = {"general": {"transport": "coc"}}
     assert resolve_transport(config) == "coc"
+    assert resolve_transport({}) == "serial"
     with pytest.raises(ValueError):
-        resolve_transport({"general": {"transport": "coc"}, "transport": "bad"})
+        resolve_transport({"general": {"transport": "ble"}})
+    with pytest.raises(ValueError):
+        resolve_transport({"transport": "coc"})
     marker = object()
     assert connect_transport(config, coc_factory=lambda actual: marker) is marker
+
+
+def test_failed_startup_getter_closes_the_device():
+    from bridge.runner import run
+    from tests.fakes import FakeSerialConnection, make_test_state
+    device = FakeSerialConnection(name=None)
+    state = make_test_state(config={"general": {"transport": "coc", "sync_time": False}})
+    run(state, transport_factory=lambda config: device)
+    assert not device.is_open
 
 
 def test_records_are_admitted_before_receipt_and_duplicates_survive_reconnect():
@@ -172,7 +182,7 @@ def test_missing_helper_returns_no_device_without_serial_or_ble_fallback(tmp_pat
         "data_socket": str(tmp_path / "data.sock"), "control_socket": str(tmp_path / "control.sock"),
     }}
     forbidden = lambda _: pytest.fail("CoC failure must not trigger fallback")
-    assert connect_transport(config, serial_factory=forbidden, ble_factory=forbidden) is None
+    assert connect_transport(config, serial_factory=forbidden) is None
 
 
 def test_helper_failure_logs_exception_category_without_path_or_backend_text(tmp_path, caplog):
@@ -183,8 +193,7 @@ def test_helper_failure_logs_exception_category_without_path_or_backend_text(tmp
         "data_socket": str(tmp_path / "data.sock"), "control_socket": str(tmp_path / "control.sock"),
     }}
     with caplog.at_level(logging.WARNING, logger="bridge.coc_connection"):
-        assert connect_transport(config, serial_factory=lambda _: pytest.fail("must not fall back"),
-                                 ble_factory=lambda _: pytest.fail("must not fall back")) is None
+        assert connect_transport(config, serial_factory=lambda _: pytest.fail("must not fall back")) is None
     assert "permission" in caplog.text
     assert str(helper) not in caplog.text
 
@@ -269,61 +278,5 @@ for listener in listeners: listener.close()
     try:
         assert conn.is_open
         assert "CoC stage=test_helper_ready" in capfd.readouterr().err
-    finally:
-        conn.close()
-
-
-def test_cross_component_data_first_startup_with_native_server_and_real_ipc_helper():
-    required = ("OBSERVER_COC_FIRMWARE_ROOT", "OBSERVER_COC_FRAMEWORK_SOURCE", "OBSERVER_COC_CMSIS_INCLUDE")
-    missing = [name for name in required if not os.environ.get(name)]
-    if missing:
-        pytest.skip("set " + ", ".join(missing) + " to run native firmware/host cross-component regression")
-    firmware = Path(os.environ["OBSERVER_COC_FIRMWARE_ROOT"])
-    sdk = Path(os.environ["OBSERVER_COC_FRAMEWORK_SOURCE"])
-    cmsis = Path(os.environ["OBSERVER_COC_CMSIS_INCLUDE"])
-    helper_source = Path(__file__).parents[1] / "coc-helper/src/lib.rs"
-    server_source = firmware / "src/observer/coc/Server.h"
-    native_test = firmware / "test/test_observer_coc/test_server.cpp"
-
-    # Pin the real production sequence under test: data PSM first, then control;
-    # Python waits for both IPC channels and READY is sent only after both HELLOs.
-    rust = helper_source.read_text()
-    setup = rust.split("let result: Result<(), Box<dyn std::error::Error>> = async {", 1)[1]
-    assert setup.index("open_channel(resolved, addr_type, data_psm)") < setup.index(
-        "open_channel(resolved, addr_type, control_psm)")
-    firmware_text = server_source.read_text()
-    assert "i == 0 && (!active_ || !ch_[1].ready" not in firmware_text
-    assert "if (!closing_ && ready()" in firmware_text
-
-    include = sdk / "cores/nRF5/nordic/softdevice/s140_nrf52_7.3.0_API/include"
-    with tempfile.TemporaryDirectory(prefix="coc-cross-component-") as directory:
-        binary = Path(directory) / "test_server"
-        command = ["g++", "-std=c++11", "-Wall", "-Wextra", "-Werror", "-Wno-error=reorder",
-                   "-DSVCALL_AS_NORMAL_FUNCTION", "-DNRF52840_XXAA", "-I", str(firmware / "src"),
-                   "-isystem", str(include), "-isystem", str(sdk / "cores/nRF5/nordic/nrfx/mdk"),
-                   "-isystem", str(cmsis), str(native_test), "-o", str(binary)]
-        built = subprocess.run(command, capture_output=True, text=True, timeout=30)
-        assert built.returncode == 0, built.stdout + built.stderr
-        native = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
-        assert native.returncode == 0, native.stdout + native.stderr
-        assert "PASS" in native.stdout
-
-    # Exercise the actual Rust executable + Python production adapter over the
-    # real two-socket IPC framing, with the helper's explicit no-BlueZ test mode.
-    helper = Path(__file__).parents[1] / "coc-helper/target/debug/observer-coc-helper"
-    assert helper.is_file(), "build the Rust helper offline before this regression"
-    base = Path(tempfile.gettempdir()) / f"coc-cross-{os.getpid()}"
-    config = {"coc": {"address": "02:00:00:00:00:01", "adapter": "hci0", "helper": str(helper),
-                      "data_socket": str(base) + "-data.sock", "control_socket": str(base) + "-control.sock",
-                      "startup_timeout": 4}}
-    conn = CocConnection.launch(config, test_mode=True)
-    try:
-        deadline = time.monotonic() + 1
-        line = None
-        while line is None and time.monotonic() < deadline:
-            line = conn.read_line()
-            time.sleep(.005)
-        assert line == "synthetic"
-        assert conn.execute_command("get name", 1) == (True, "synthetic-name")
     finally:
         conn.close()

@@ -61,9 +61,7 @@ class PahoBrokerClient(BrokerClient):
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=client_id,
             clean_session=True,
-            transport=transport,
-            # MqttManager owns retries, client replacement and token refresh.
-            reconnect_on_failure=False,
+            transport=transport
         )
 
         if userdata:

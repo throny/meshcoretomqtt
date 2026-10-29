@@ -9,9 +9,6 @@
 #   3. /etc/mctomqtt/config.d/99-user.toml (local overrides, loaded last)
 #
 # Put your customizations in /etc/mctomqtt/config.d/99-user.toml
-# Config may contain broker passwords. Stage config directories as root:service
-# group 0750 and all base/preset/user TOML as 0640, for serial as well as BLE.
-# Never put private keys, tokens or BLE pairing passkeys in these files.
 #
 # The --config flag bypasses default loading entirely. Multiple --config flags
 # are supported; files are loaded in order, each overlaying the previous.
@@ -26,15 +23,7 @@ log_level = "INFO"
 
 # Wait for system clock sync (via timedatectl) before setting repeater time
 sync_time = true
-# For CoC, also restore UTC after reconnects/radio reboot. Requires verified
-# host NTP synchronization; rejected/unacknowledged writes are logged.
-
-# Device transport. Keep "serial" for USB; "ble" and "coc" are opt-in and
-# never fall back automatically to another device or transport.
-# This general.transport value is canonical for connection/watchdog/logging.
-# Legacy top-level transport is used only if this key is absent from merged
-# config. Both supplied values must be exactly "serial", "ble", or "coc"; invalid values
-# fail, even if shadowed. A valid canonical value wins over a valid legacy value.
+# Device connection: "serial" (default) or the optional Linux CoC helper.
 transport = "serial"
 
 [serial]
@@ -50,41 +39,13 @@ timeout = 2
 # Watchdog: seconds with no data before forcing serial reconnect (0 to disable)
 watchdog_timeout = 900
 
-# Set transport = "ble" above to enable the custom SenseCAP observer service.
-# The BlueZ device must already be paired and trusted; do not record passkeys,
-# private keys, or broker tokens in this file.
-# The adapter checks the BlueZ backend's bond/trust properties (Bleak 3.0.2);
-# missing/unverified state is rejected, not overridden by this configuration.
-# Requires the 16-byte session/sequence protocol and separate ACK/stats GATT
-# characteristics. ACK means RAM reassembly, not MQTT delivery; no durable replay.
-# Same-record offset-zero retries replace partial bytes; only completion is ACKed.
-# A stopped owner loop is not open; unresolved backend connection state blocks
-# reopening a second link. There is no timeout/security bypass configuration.
-# Session-history retirement uses automatic reconnect; no operator restart setting.
-# The separate BLE systemd template retries clean unavailable-startup exits with
-# Restart=always; explicit supervisor stop uses SIGTERM without auto-restart.
-# Failed startup (including exhausted MQTT retries) closes the device before
-# return. This is resource cleanup, not durable offline MQTT storage/replay.
-# Installed-unit retry/stop and real BlueZ permissions remain untested here.
-[ble]
-# address = "REPLACE_WITH_CONFIRMED_BONDED_BLE_ADDRESS"
-# service_uuid = "10c25d4a-3c61-50a3-5e48-566b026f5f1b"
-# watchdog_timeout = 900
-
-# Experimental two-channel LE CoC transport. This does not change serial/GATT
-# defaults, and is not managed by the installer or a service unit. Build the
-# helper offline with the documented Rust command before selecting transport="coc".
-# It requires an already Paired/Trusted/Bonded, unblocked BlueZ peer, does not pair
-# or scan, and refuses a one-channel descriptor. Runtime/hardware validation is
-# a separate approval gate. Receipts mean bounded host admission, never MQTT delivery.
 [coc]
-# address = "REPLACE_WITH_PINNED_RESOLVED_BONDED_ADDRESS"
+# Required only when general.transport = "coc". Enroll and pin the peer first.
+# address = "02:00:00:00:00:01"
 # adapter = "hci0"
 # helper = "/opt/mctomqtt/bin/observer-coc-helper"
-# data_socket = "/run/mctomqtt/coc-data.sock"
-# control_socket = "/run/mctomqtt/coc-control.sock"
-# startup_timeout = 12
-# queue_limit = 64
+# data_socket = "/run/mctomqtt-coc/data.sock"
+# control_socket = "/run/mctomqtt-coc/control.sock"
 
 [topics]
 # Topic templates - supported variables: {IATA}, {PUBLIC_KEY}
@@ -152,8 +113,6 @@ branch = "main"
 # port = 1883
 # transport = "tcp"          # "tcp" or "websockets"
 # keepalive = 60
-# MQTT keepalive remains handled by Paho. Reconnect retries are owned by the
-# bridge manager, not a second independent Paho reconnect loop.
 # client_id_prefix = "meshcore_"
 # qos = 0
 # retain = true

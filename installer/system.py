@@ -127,7 +127,7 @@ def detect_linux_distro() -> tuple[str | None, str | None]:
     return dist_id, dist_like
 
 
-def install_os_build_deps(*, wheel_checker=None) -> bool:
+def install_os_build_deps() -> bool:
     """Check for and optionally install OS build dependencies for C extensions."""
     # Check if we already have the necessary tools
     cc_present = shutil.which("cc") or shutil.which("gcc")
@@ -141,8 +141,7 @@ def install_os_build_deps(*, wheel_checker=None) -> bool:
     print_info("These may be required to install ed25519-orlp.")
 
     # Check for pre-compiled wheel fallback
-    checker = check_piwheels_available if wheel_checker is None else wheel_checker
-    if checker("ed25519-orlp"):
+    if check_piwheels_available("ed25519-orlp"):
         print_success("A pre-compiled wheel was found on piwheels.org for this platform, so build tools may not be needed")
         if not prompt_yes_no("Install build tools anyway?", "n"):
             print_info("Skipping toolchain installation (expecting pip to use pre-compiled wheel)")
@@ -211,15 +210,14 @@ def require_root() -> None:
         raise SystemExit(1)
 
 
-def chown_recursive(path: str, user: str, group: str, *, change_owner=None) -> None:
+def chown_recursive(path: str, user: str, group: str) -> None:
     """Recursively chown a directory tree."""
-    change_owner = shutil.chown if change_owner is None else change_owner
-    change_owner(path, user, group)
+    shutil.chown(path, user, group)
     for dirpath, dirnames, filenames in os.walk(path):
         for d in dirnames:
-            change_owner(os.path.join(dirpath, d), user, group)
+            shutil.chown(os.path.join(dirpath, d), user, group)
         for f in filenames:
-            change_owner(os.path.join(dirpath, f), user, group)
+            shutil.chown(os.path.join(dirpath, f), user, group)
 
 
 # ---------------------------------------------------------------------------
@@ -406,33 +404,27 @@ def create_system_user(svc_user: str, install_dir: str) -> None:
 # Permissions
 # ---------------------------------------------------------------------------
 
-def set_permissions(install_dir: str, config_dir: str, svc_user: str, *, change_owner=None) -> None:
+def set_permissions(install_dir: str, config_dir: str, svc_user: str) -> None:
     """Set directory ownership and permissions."""
     # /opt/mctomqtt owned by svc_user:svc_user
-    if change_owner is None:
-        chown_recursive(install_dir, svc_user, svc_user)
-    else:
-        chown_recursive(install_dir, svc_user, svc_user, change_owner=change_owner)
+    chown_recursive(install_dir, svc_user, svc_user)
     print_success(f"{install_dir} owned by {svc_user}:{svc_user}")
 
-    # Config may contain broker credentials: only root and the service group.
-    if change_owner is None:
-        chown_recursive(config_dir, "root", svc_user)
-    else:
-        chown_recursive(config_dir, "root", svc_user, change_owner=change_owner)
-    os.chmod(config_dir, 0o750)
+    # /etc/mctomqtt owned by root:svc_user, mode 755 (world-readable)
+    chown_recursive(config_dir, "root", svc_user)
+    os.chmod(config_dir, 0o755)
     config_d = Path(config_dir) / "config.d"
     if config_d.exists():
-        os.chmod(str(config_d), 0o750)
+        os.chmod(str(config_d), 0o755)
 
     config_toml = Path(config_dir) / "config.toml"
     if config_toml.exists():
-        os.chmod(str(config_toml), 0o640)
+        os.chmod(str(config_toml), 0o644)
 
     for override in config_d.glob("*.toml") if config_d.exists() else []:
-        os.chmod(str(override), 0o640)
+        os.chmod(str(override), 0o644)
 
-    print_success(f"Permissions set on {config_dir} (root:{svc_user}, 750/640)")
+    print_success(f"Permissions set on {config_dir} (root:{svc_user}, 755/644)")
 
 
 # ---------------------------------------------------------------------------
@@ -932,12 +924,6 @@ def cleanup_legacy_nvm(install_dir: str) -> None:
         print_info(f"Keeping {nvm_dir}")
 
 
-def runtime_dependency_install_command(venv_dir: str) -> list[str]:
-    """Build the argv for the runtime dependency step without performing I/O."""
-    return [f"{venv_dir}/bin/pip", "install", "--quiet", "pyserial", "paho-mqtt",
-            "ed25519-orlp", "bleak>=0.22"]
-
-
 def create_venv(install_dir: str, svc_user: str) -> None:
     """Create Python virtual environment and install dependencies."""
     venv_dir = f"{install_dir}/venv"
@@ -947,7 +933,7 @@ def create_venv(install_dir: str, svc_user: str) -> None:
     if not os.environ.get("INSTALL_REBUILD_VENV"):
         try:
             result = run_cmd(
-                [venv_python, "-c", "import serial, paho.mqtt.client, ed25519_orlp, bleak"],
+                [venv_python, "-c", "import serial, paho.mqtt.client, ed25519_orlp"],
                 check=False, capture=True,
             )
             if result.returncode == 0:
@@ -980,8 +966,8 @@ def create_venv(install_dir: str, svc_user: str) -> None:
 
     print_info("Installing Python dependencies...")
     run_cmd([f"{venv_dir}/bin/pip", "install", "--quiet", "--upgrade", "pip"])
-    run_cmd(runtime_dependency_install_command(venv_dir))
-    print_success("Python dependencies installed (pyserial, paho-mqtt, ed25519-orlp, bleak)")
+    run_cmd([f"{venv_dir}/bin/pip", "install", "--quiet", "pyserial", "paho-mqtt", "ed25519-orlp"])
+    print_success("Python dependencies installed (pyserial, paho-mqtt, ed25519-orlp)")
 
 
 # ---------------------------------------------------------------------------

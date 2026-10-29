@@ -8,12 +8,11 @@ import subprocess
 import threading
 import time
 from time import sleep
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from config_loader import log_config_sources, resolve_transport
 
 from . import serial_connection
-from . import ble_connection
 from . import coc_connection
 from . import message_parser
 from . import background
@@ -33,14 +32,14 @@ def process_device_line(state: BridgeState) -> bool:
         return False
     if getattr(state.device, "record_gap_before_line", False):
         state.last_raw = None
-    # BLE also carries key replies; never dump its unclassified stream to logs.
-    if not isinstance(state.device, (ble_connection.BleConnection, coc_connection.CocConnection)):
+    # CoC also carries key replies; never dump its unclassified stream to logs.
+    if not isinstance(state.device, coc_connection.CocConnection):
         logger.debug(f"RX: {line}")
     message_parser.parse_and_publish(state, line)
     return True
 
 
-def connect_transport(config: dict[str, Any], *, serial_factory=None, ble_factory=None, coc_factory=None):
+def connect_transport(config: dict[str, Any], *, serial_factory=None, coc_factory=None):
     """Connect the explicitly selected device transport; serial is the default."""
     try:
         transport = resolve_transport(config)
@@ -49,9 +48,7 @@ def connect_transport(config: dict[str, Any], *, serial_factory=None, ble_factor
         return None
     if transport == 'serial':
         return (serial_connection.connect if serial_factory is None else serial_factory)(config)
-    if transport == 'coc':
-        return (coc_connection.connect if coc_factory is None else coc_factory)(config)
-    return (ble_connection.connect if ble_factory is None else ble_factory)(config)
+    return (coc_connection.connect if coc_factory is None else coc_factory)(config)
 
 
 def load_client_version(version: str) -> str:
@@ -129,8 +126,7 @@ def _connect_device(state: BridgeState, transport_factory, *, time_sync_wait=Non
     return state.device
 
 
-def run(state: BridgeState, *, transport_factory=None,
-        startup_wait: Callable[[float], None] | None = None) -> None:
+def run(state: BridgeState, *, transport_factory=None) -> None:
     """Main orchestration: connect serial, query device, connect MQTT, read loop."""
     stats_thread = threading.Thread(
         target=background.stats_logging_loop,
@@ -143,14 +139,12 @@ def run(state: BridgeState, *, transport_factory=None,
     # not leave a BlueZ connection alive after this process exits.
     try:
         _run(state, stats_thread,
-             connect_transport if transport_factory is None else transport_factory,
-             sleep if startup_wait is None else startup_wait)
+             connect_transport if transport_factory is None else transport_factory)
     finally:
         _cleanup(state, stats_thread)
 
 
-def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory,
-         startup_wait: Callable[[float], None]) -> None:
+def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory) -> None:
     """Run startup and packet processing within the caller's cleanup scope."""
     log_config_sources(state.config)
 
@@ -231,7 +225,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory,
             retry_count += 1
             wait_time = min(retry_count * 2, 30)
             logger.warning(f"[MQTT] Initial connection failed. Retrying in {wait_time}s... (attempt {retry_count}/{max_initial_retries})")
-            startup_wait(wait_time)
+            sleep(wait_time)
 
     if state.should_exit:
         return
@@ -247,7 +241,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory,
 
     # Watchdog: force reconnect if no data received for this many seconds.
     transport_name = resolve_transport(state.config)
-    transport_label = {"ble": "BLE", "coc": "CoC"}.get(transport_name, "Serial")
+    transport_label = "CoC" if transport_name == "coc" else "Serial"
     transport_cfg = state.config.get(transport_name, {})
     watchdog_timeout = transport_cfg.get('watchdog_timeout', 900)
     watchdog_logged = False

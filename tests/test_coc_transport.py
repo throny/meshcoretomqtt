@@ -23,7 +23,7 @@ def test_protocol_roundtrip_and_rejects_wrong_direction():
 
 
 @pytest.mark.parametrize("prefix", ["> ", "-> > ", "-> ", ""])
-def test_cli_reply_normalization_matches_existing_gatt(prefix):
+def test_cli_reply_normalization_accepts_serial_cli_prefixes(prefix):
     key = "ab" * 64
     assert CocConnection._extract_response("get prv.key", prefix + key) == key
     assert CocConnection._extract_response("get name", prefix + "node") == "node"

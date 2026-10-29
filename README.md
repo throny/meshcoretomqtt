@@ -17,105 +17,20 @@ One way of tracking a message through the mesh is filtering the MQTT data on the
 `hash` field when the source log format includes it. Dispatcher/serial packet
 logs include `hash=...`, while current repeater packet logs may not.
 
-## Optional LE L2CAP CoC repeater observer (experimental)
+## Optional Bluetooth connection (experimental)
 
-`general.transport = "coc"` selects Bluetooth LE's **Credit-Based
-Connection-Oriented Channels**. It requires the matching experimental repeater
-firmware and a separately built Linux/BlueZ Rust helper. USB serial remains the
-default; this backend never falls back to serial or legacy GATT BLE.
+The `coc` transport reads repeater logs over Bluetooth LE L2CAP instead of USB.
+CoC means Credit-Based Connection-Oriented Channels. It requires the matching
+experimental repeater firmware and a separately built Linux/BlueZ Rust helper.
 
-Set `general.sync_time = true` to restore the repeater's UTC clock on startup
-and every CoC reconnect, including after a radio reboot. The host must report
-NTP synchronization and the device must acknowledge the clock command; failures
-are logged rather than reported as success. An explicit `false` disables writes.
+USB serial remains the default. Select `general.transport = "coc"` explicitly;
+there is no fallback to another transport. The existing parser and MQTT settings
+are reused. With `sync_time = true`, the bridge also restores the repeater's UTC
+clock after reconnecting.
 
-The two-channel backend has been used on one P1-Pro/Linux deployment. This is
-not general hardware, power, uninterrupted-delivery or recovery acceptance.
-Host receipts mean in-memory admission, not persistent storage or MQTT delivery.
-See [setup, security and tests](docs/coc-development.md). The normal installer
-does not build the helper, enroll peers, flash firmware or install a CoC service.
-
-## Optional BLE repeater observer (experimental)
-
-This modified build advertises `meshcoretomqtt/1.3.0.0-preview+ble` in MQTT
-status messages and token-auth client claims (with a git hash appended when
-available). The `+ble` marker distinguishes this experimental derivative from
-stock upstream; it identifies the build, not the selected transport. Upstream
-package metadata remains unchanged. Node identity, topics and credentials are
-unaffected.
-
-USB serial remains the default. An opt-in `general.transport = "ble"` adapter
-supports the custom BLE repeater-observer protocol, **not** the Companion BLE
-protocol or stock repeater firmware. Initial hardware validation covers a
-SenseCAP Solar / P1-Pro repeater and a Linux BlueZ host; other repeater boards,
-Bluetooth adapters and host platforms are unvalidated and may need a port.
-
-BLE connection opens are logged at INFO. Command failures and observer-counter
-read failures emit WARNING diagnostics with a fixed command category, failure
-stage, elapsed milliseconds, link state and numeric transport counters. They do
-not include peer addresses, command values, replies or backend exception text.
-These diagnostics do not change timeouts or reconnect policy. Missing uptime
-samples can reflect partial device stats even while MQTT remains connected;
-an `online` status alone is not proof of healthy BLE delivery.
-
-Each periodic stats poll also logs a numeric `BLE observer framing` summary:
-notification-length buckets/minimum/maximum and separate rejection reasons
-(short header, invalid identity/total, empty payload, overrun, missing start,
-record switch, length change or offset mismatch). These additive counters are
-also in `observer_host` stats and reset with the connection object. They do not
-contain header values or payloads, do not log every notification, and do not
-relax frame validation. A rejection pattern is a diagnostic clue, not by itself
-proof of ATT fragmentation or a count of unique lost RF packets.
-
-BLE teardown calls backend `disconnect()` even after the physical link has
-already dropped. With Bleak 3.0.2, remote disconnection alone leaves its D-Bus
-connection open; releasing that owner prevents stale BlueZ notification sessions
-from surviving reconnects. Notification stop is attempted only while connected.
-Cleanup remains bounded and does not relax ACK/reassembly checks or change
-command timeouts. Offline tests cover this cleanup path; they do not certify
-long-running hardware recovery or establish that every gap has the same cause.
-
-See `config.toml.example` for explicit BLE peer selection and per-broker region
-settings, and validate the exact configuration before running it:
-
-```sh
-python3 preflight_config.py --config /path/to/observer-config.toml
-python3 mctomqtt.py --config /path/to/observer-config.toml
-```
-
-The peer must already be bonded/trusted through the firmware's physical
-operator-authorized enrollment flow. No automatic peer selection, pairing, firmware
-flashing, secret-key provisioning, or service installation is performed by the
-adapter. Private-key material used for broker signing stays in process memory.
-The inherited serial installer/unit is not a turnkey BLE deployment; review
-permissions, isolated configuration and rollback before enabling a BLE service.
-
-Complete records are ACKed after bounded host RAM reassembly, **not** MQTT
-receipt. BLE and MQTT loss/failure counters remain separate; there is no durable
-MQTT replay guarantee. Full power/RF, security/interruption and unattended field
-acceptance remain outside the short initial hardware checks.
-
-Standalone bridge tests report firmware-dependent C++ wire checks as skipped
-when no firmware tree is present. For cross-layer validation set
-`OBSERVER_SOURCE` to the exact reviewed, patched firmware checkout; an explicit
-invalid source fails rather than skipping. The whole-stack candidate workflow
-supplies that source and runs these checks.
-
-### Startup cleanup and contributor conventions
-
-Device cleanup encloses initialization as well as packet processing. Failed
-startup getters, initialization exceptions and exhausted initial MQTT retries
-release the device; stop requests between retries do not start another attempt.
-This is not durable offline delivery or a guarantee against every forced-kill,
-controller or peripheral failure. No automatic Bluetooth reset is performed.
-
-External I/O is supplied through explicit factories for embedding and tests;
-normal CLI defaults, serial selection and network timeouts are unchanged.
-The new BLE tests use injected fakes, real temporary files and real UTC timestamp
-validation rather than global clock/core-module mocks. Permission fixtures use
-an explicit ownership callable with real filesystem operations. Installer
-runtime dependency argv is tested without executing installs or suppressing file
-operations. See `AGENTS.md` for contributor rules and test boundaries.
+See [CoC setup](docs/coc.md). This does not install the helper, pair or flash a
+radio. It has been used on one P1-Pro/Linux setup; other hardware, power use and
+long-term reliability remain unverified. Receipts do not guarantee MQTT delivery.
 
 ## Quick Install
 
@@ -624,13 +539,6 @@ Learn at https://letsmesh.net/
 
   **debug**: Debug info (if enabled on the repeater build).
 
-## MQTT recovery
-
-The bridge manager handles reconnects, including retry delays and fresh auth
-tokens. Paho's independent automatic reconnect is disabled to avoid competing
-connection attempts. Recovery therefore waits for the main loop to run; this
-does not prevent network/broker outages or add packet buffering or replay.
-
 ## Example MQTT data...
 
 Note: origin is the repeater node reporting the data to mqtt. Not the origin of
@@ -646,7 +554,6 @@ Topic: meshcore/SEA/A1B2.../packets QoS: 0
 Direct packet...
 
 ```
-
 Topic: meshcore/SEA/A1B2.../packets QoS: 0
 {"origin": "ag loft rpt", "origin_id": "A1B2...", "timestamp": "2025-03-15T23:09:00.710459", "type": "PACKET", "direction": "rx", "time": "23:08:59", "date": "15/3/2025", "len": "22", "packet_type": "2", "route": "D", "payload_len": "20", "raw": "0A1B2C...", "SNR": "5", "RSSI": "-93", "score": "1000", "hash": "890BFA3069FD1250", "path": "C2 -> E2"}
 ```

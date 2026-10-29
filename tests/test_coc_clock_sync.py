@@ -31,7 +31,7 @@ def test_radio_reconnect_restores_clock_without_restarting_bridge():
     assert all(device.time_set for device in devices)
 
 
-@pytest.mark.parametrize("transport", ["serial", "ble"])
+@pytest.mark.parametrize("transport", ["serial"])
 def test_other_transports_keep_existing_startup_policy(transport):
     state = make_test_state(config={"general": {"transport": transport}})
     state.sync_time_at_start = True
