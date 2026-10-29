@@ -1,0 +1,30 @@
+[Unit]
+Description=MeshCore observer BLE preflight instance (manual use only)
+After=time-sync.target network-online.target bluetooth.service
+Wants=time-sync.target network-online.target
+
+[Service]
+Type=exec
+User=mctomqtt
+Group=mctomqtt
+UMask=0077
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/opt/mctomqtt
+RuntimeDirectory=mctomqtt-ble
+RuntimeDirectoryMode=0700
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/opt/mctomqtt/venv/bin/python3 /opt/mctomqtt/preflight_config.py --config /etc/mctomqtt/config.toml
+ExecStart=/opt/mctomqtt/venv/bin/python3 /opt/mctomqtt/mctomqtt.py --config /etc/mctomqtt/config.toml
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/mctomqtt
+
+# Deliberately no [Install] section. Do not install/enable/start during preparation.

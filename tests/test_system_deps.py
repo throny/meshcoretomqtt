@@ -151,7 +151,7 @@ class TestSystemDeps:
     @patch("platform.system", return_value="Linux")
     def test_install_os_build_deps_unrecognized_linux(self, mock_sys, mock_distro, mock_which):
         with patch("installer.system.print_warning") as mock_warn:
-            assert install_os_build_deps() is False
+            assert install_os_build_deps(wheel_checker=lambda _: False) is False
             mock_warn.assert_any_call("Unsupported or unrecognized distribution: gentoo (like: none)")
 
     @patch("shutil.which", return_value=None)
@@ -160,5 +160,5 @@ class TestSystemDeps:
     def test_install_os_build_deps_non_linux(self, mock_sys, mock_distro, mock_which):
         # On non-linux unknown distro, we just advise manual install
         with patch("installer.system.print_info") as mock_info:
-            assert install_os_build_deps() is False
+            assert install_os_build_deps(wheel_checker=lambda _: False) is False
             mock_info.assert_any_call("Please manually install a C toolchain and Python headers if the installation fails.")

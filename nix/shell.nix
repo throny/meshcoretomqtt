@@ -14,6 +14,7 @@
             paho-mqtt
             pyserial
             ed25519-orlp
+            bleak
           ]))
       ];
     };

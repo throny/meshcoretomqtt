@@ -22,7 +22,7 @@ RUN apk add --no-cache --virtual .build-deps \
     curl \
     libstdc++ \
     libgcc \
-    && pip3 install pyserial paho-mqtt ed25519-orlp --no-cache-dir \
+    && pip3 install pyserial paho-mqtt ed25519-orlp 'bleak>=0.22' --no-cache-dir \
     && apk del .build-deps
 
 # Copy application files

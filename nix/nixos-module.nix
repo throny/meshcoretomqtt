@@ -105,6 +105,8 @@
         timeout = serialTimeout;
       };
 
+      transport = "serial";
+
       topics = {
         status = "meshcore/{IATA}/{PUBLIC_KEY}/status";
         packets = "meshcore/{IATA}/{PUBLIC_KEY}/packets";

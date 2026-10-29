@@ -7,6 +7,7 @@ dependencies = [
     "paho-mqtt",
     "tomli",
     "pyserial",
+    "bleak>=0.22",
 ]
 
 [project.optional-dependencies]
