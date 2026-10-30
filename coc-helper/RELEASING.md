@@ -42,9 +42,11 @@ builds release binaries as an unprivileged container user, validates their ELF
 architecture and uploads one artifact per platform. It has read-only repository
 permissions and does **not** publish a release.
 
-The Docker image has a fixed version tag; it is not an immutable/reproducible
-toolchain pin. Do not describe these builds as byte-reproducible. GitHub Actions
-dependencies are pinned to reviewed commit SHAs.
+The builder and emulation images are digest-pinned, and GitHub Actions are pinned
+to reviewed commit SHAs. These pins alone do not establish byte reproducibility.
+CI runs the 16 hardware-independent tests. The socket-security test additionally
+requires a host kernel with Bluetooth L2CAP support, which hosted runners lack;
+run the full 17-test suite on a suitable Linux host.
 
 ## Assemble and verify
 
