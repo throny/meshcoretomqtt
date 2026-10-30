@@ -438,7 +438,7 @@ class CocConnection(SerialConnection):
 
     def set_time(self) -> None:
         ok, response = self.execute_command(f"time {int(time.time())}")
-        if not ok or not response.startswith("OK - clock set:"):
+        if not ok or not (response == "OK - clock set" or response.startswith("OK - clock set:")):
             raise OSError("CoC clock synchronization was not acknowledged")
 
     def _get(self, command: str) -> str | None:

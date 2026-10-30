@@ -84,6 +84,8 @@ def test_coc_accepts_verified_ntp_property_independent_of_display_locale():
 
 @pytest.mark.parametrize("ok,response", [
     (False, "Command timeout"), (True, "ERR: rejected"), (True, "(no output)"),
+    (True, "OK - clock set failed"), (True, "OK - clock setter"),
+    (True, "(ERR: clock cannot go backwards)"),
 ])
 def test_coc_clock_write_requires_positive_reply(ok, response):
     class Reply(CocConnection):
@@ -96,3 +98,19 @@ def test_coc_clock_write_requires_positive_reply(ok, response):
 
     with pytest.raises(OSError, match="clock synchronization"):
         Reply().set_time()
+
+
+@pytest.mark.parametrize("response", [
+    "OK - clock set",
+    "OK - clock set: 12:00 - 30/10/2026 UTC",
+])
+def test_coc_accepts_released_and_upstream_clock_success(response):
+    class Reply(CocConnection):
+        def __init__(self):
+            pass
+
+        def execute_command(self, command, timeout=10.0):
+            assert command.startswith("time ")
+            return True, response
+
+    Reply().set_time()
