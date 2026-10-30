@@ -1,0 +1,52 @@
+name: Build CoC helper candidates
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            machine: x86_64
+          - platform: linux/arm64
+            machine: aarch64
+          - platform: linux/arm/v7
+            machine: armv7l
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm,arm64
+      - name: Test and build on Debian Bookworm
+        env:
+          BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          docker run --rm --platform "$BUILD_PLATFORM" \
+            --user "$(id -u):$(id -g)" \
+            -e CARGO_HOME=/tmp/cargo -e RUSTUP_HOME=/usr/local/rustup \
+            -e RUSTUP_TOOLCHAIN=1.90.0 -e HOME=/tmp \
+            -e RUSTFLAGS=--remap-path-prefix=/workspace=/src \
+            -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+            rust:1.90.0-bookworm \
+            sh -ec 'cargo test --locked --manifest-path coc-helper/Cargo.toml && cargo build --locked --release --manifest-path coc-helper/Cargo.toml'
+      - name: Package and validate ELF architecture
+        env:
+          BUILD_MACHINE: ${{ matrix.machine }}
+        run: |
+          python3 coc-helper/package_release.py \
+            --binary coc-helper/target/release/observer-coc-helper \
+            --machine "$BUILD_MACHINE" --output helper-assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coc-helper-${{ matrix.machine }}
+          path: helper-assets/
+          if-no-files-found: error
+          retention-days: 14
