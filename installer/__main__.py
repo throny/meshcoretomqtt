@@ -31,6 +31,14 @@ def main() -> None:
     from .coc_doctor import add_arguments as add_doctor_arguments
     add_doctor_arguments(doctor_p)
 
+    coc_p = sub.add_parser("configure-coc", help="Configure optional Bluetooth on an existing Linux/systemd install")
+    coc_p.add_argument("--address", required=True, help="Already enrolled repeater Bluetooth address")
+    coc_p.add_argument("--adapter", default="hci0")
+    source = coc_p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--helper", help="Local prebuilt helper executable")
+    source.add_argument("--helper-version", help="Fixed helper release version, for example 0.1.0")
+    coc_p.add_argument("--sha256", help="Expected SHA-256 (required for a local helper)")
+
     args: argparse.Namespace = parser.parse_args()
 
     if not args.command:
@@ -40,6 +48,9 @@ def main() -> None:
     if args.command == "coc-doctor":
         from .coc_doctor import run as run_doctor
         sys.exit(run_doctor(args))
+
+    if args.command == "configure-coc" and args.helper and not args.sha256:
+        parser.error("--helper requires an independently verified --sha256")
 
     require_root()
 
@@ -65,6 +76,32 @@ def main() -> None:
         if not run_migrate(ctx):
             print("No legacy installation found to migrate.")
             sys.exit(0)
+
+    elif args.command == "configure-coc":
+        from pathlib import Path
+        import platform
+        import tempfile
+        from .coc import configure_coc, download_helper
+        try:
+            if args.helper:
+                configure_coc(ctx, address=args.address, adapter=args.adapter,
+                              helper=Path(args.helper), sha256=args.sha256)
+            else:
+                data, digest = download_helper(args.helper_version, platform.machine().lower())
+                with tempfile.TemporaryDirectory(prefix="mctomqtt-coc-") as directory:
+                    helper = Path(directory) / "helper"
+                    helper.write_bytes(data)
+                    configure_coc(ctx, address=args.address, adapter=args.adapter,
+                                  helper=helper, sha256=args.sha256 or digest)
+        except ValueError as exc:
+            parser.exit(1, f"CoC setup refused: {exc}\n")
+        except OSError:
+            parser.exit(1, "CoC setup failed: check release availability, permissions and installed paths.\n")
+        print("CoC files configured; no pairing, service restart or clock write was performed.")
+        print("After enrollment and configuration review, activate with:")
+        print("  sudo systemctl daemon-reload")
+        print("  sudo systemctl restart mctomqtt.service")
+        print("  journalctl -u mctomqtt.service -n 30 --no-pager")
 
 
 if __name__ == "__main__":
