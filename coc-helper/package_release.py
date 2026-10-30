@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Package prebuilt helpers and a standard SHA256SUMS file; never builds as root."""
+"""Validate prebuilt Linux helpers and write standard release checksums."""
 import argparse
 import hashlib
 from pathlib import Path
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from installer.coc import release_asset, verify_helper
+import struct
 
 
 def main():
@@ -16,9 +13,17 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     data = args.binary.read_bytes()
-    digest = hashlib.sha256(data).hexdigest()
-    verify_helper(data, digest, args.machine)
-    _, name = release_asset("0.1.0", args.machine)
+    arches = {"x86_64": (2, 62, "x86_64"), "aarch64": (2, 183, "aarch64"),
+              "armv7l": (1, 40, "armv7")}
+    if args.machine not in arches:
+        raise ValueError("Unsupported helper architecture")
+    elf_class, machine, suffix = arches[args.machine]
+    if (len(data) < 64 or data[:6] != b"\x7fELF" + bytes([elf_class, 1])
+            or struct.unpack_from("<H", data, 18)[0] != machine
+            or struct.unpack_from("<H", data, 16)[0] not in (2, 3)
+            or (machine == 40 and not struct.unpack_from("<I", data, 36)[0] & 0x400)):
+        raise ValueError("ELF architecture/ABI does not match the release asset")
+    name = "observer-coc-helper-" + suffix
     if args.output.is_symlink():
         raise ValueError("Output must not be a symlink")
     asset = args.output / name

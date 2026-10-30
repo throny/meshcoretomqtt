@@ -1,5 +1,24 @@
 # Building helper releases
 
+## Build locally
+
+Most users should use a prebuilt helper. For development or an unsupported host,
+install Rust 1.90 or newer and native C build tools, then run from the repository
+root as an unprivileged user:
+
+```sh
+cargo fetch --locked --manifest-path coc-helper/Cargo.toml
+cargo test --offline --locked --manifest-path coc-helper/Cargo.toml
+cargo build --offline --locked --release --manifest-path coc-helper/Cargo.toml
+```
+
+The executable is `coc-helper/target/release/observer-coc-helper`. The first command
+downloads dependencies; the remaining commands use the locked, cached inputs.
+Build on a compatible target system; a binary from a newer glibc installation
+may not run on an older host.
+
+## Release layout
+
 Helper releases are separate from repeater firmware. The installer expects a
 fixed tag such as `coc-helper-v0.1.0`, with these raw executables and one combined
 `SHA256SUMS` file:
@@ -23,9 +42,11 @@ builds release binaries as an unprivileged container user, validates their ELF
 architecture and uploads one artifact per platform. It has read-only repository
 permissions and does **not** publish a release.
 
-The Docker image has a fixed version tag; it is not an immutable/reproducible
-toolchain pin. Do not describe these builds as byte-reproducible. GitHub Actions
-dependencies are pinned to reviewed commit SHAs.
+The builder and emulation images are digest-pinned, and GitHub Actions are pinned
+to reviewed commit SHAs. These pins alone do not establish byte reproducibility.
+CI runs the 16 hardware-independent tests. The socket-security test additionally
+requires a host kernel with Bluetooth L2CAP support, which hosted runners lack;
+run the full 17-test suite on a suitable Linux host.
 
 ## Assemble and verify
 
