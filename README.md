@@ -19,18 +19,16 @@ logs include `hash=...`, while current repeater packet logs may not.
 
 ## Optional Bluetooth connection (experimental)
 
-The `coc` transport reads repeater logs over Bluetooth LE L2CAP instead of USB.
-CoC means Credit-Based Connection-Oriented Channels. It requires the matching
-experimental repeater firmware and a separately built Linux/BlueZ Rust helper.
+The `coc` transport receives a repeater's packet logs over Bluetooth LE instead
+of USB. It needs the CoC repeater firmware and a Linux/BlueZ helper.
+[Prebuilt helpers](https://github.com/throny/meshcoretomqtt/releases/tag/coc-helper-v0.1.0)
+are available for x86-64, ARM64 and ARMv7.
 
-USB serial remains the default. Select `general.transport = "coc"` explicitly;
-there is no fallback to another transport. The existing parser and MQTT settings
-are reused. With `sync_time = true`, the bridge also restores the repeater's UTC
-clock after reconnecting.
+USB serial remains the default. See [Bluetooth setup](docs/coc.md) to select CoC
+and configure the existing service. Your MQTT configuration stays in place.
 
-See [CoC setup](docs/coc.md). This does not install the helper, pair or flash a
-radio. It has been used on one P1-Pro/Linux setup; other hardware, power use and
-long-term reliability remain unverified. Receipts do not guarantee MQTT delivery.
+I've been running this on a P1-Pro with a Linux host since October 28. Battery
+use looks normal so far.
 
 ## Quick Install
 
