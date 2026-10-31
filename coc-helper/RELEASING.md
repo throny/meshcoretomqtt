@@ -42,8 +42,8 @@ builds release binaries as an unprivileged container user, validates their ELF
 architecture and uploads one artifact per platform. It has read-only repository
 permissions and does **not** publish a release.
 
-The builder and emulation images are digest-pinned, and GitHub Actions are pinned
-to reviewed commit SHAs. These pins alone do not establish byte reproducibility.
+The builder and emulation images are pinned by digest; GitHub Actions are pinned
+by commit SHA.
 CI runs the 16 hardware-independent tests. The socket-security test additionally
 requires a host kernel with Bluetooth L2CAP support, which hosted runners lack;
 run the full 17-test suite on a suitable Linux host.
@@ -70,9 +70,10 @@ source version, outgoing Git identity, executable content and privacy scan
 before publishing. Test installation and reception on each supported host
 architecture; an emulated unit test is not Bluetooth hardware acceptance.
 
-Publish only validated architectures and list any missing ones in the release
-notes. Do not replace existing release assets silently. Checksum verification
-establishes download integrity, not independent provenance or publisher signing.
+Publish the tested binaries with their checksum file. List any missing
+architectures in the release notes, and use a new version if a binary changes.
 
-No helper release is currently published by this work. The workflow and local
-x86_64 candidate still need multi-platform execution/acceptance before promotion.
+[Helper v0.1.0](https://github.com/throny/meshcoretomqtt/releases/tag/coc-helper-v0.1.0)
+is published for all three architectures. The ARM64 binary also passed the
+helper's test-mode data exchange on the Pi while the existing receiver kept
+running. The release page links the build and test results.
