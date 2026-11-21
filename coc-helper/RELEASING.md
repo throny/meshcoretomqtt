@@ -74,5 +74,5 @@ Publish only validated architectures and list any missing ones in the release
 notes. Do not replace existing release assets silently. Checksum verification
 establishes download integrity, not independent provenance or publisher signing.
 
-No helper release is currently published by this work. The workflow and local
-x86_64 candidate still need multi-platform execution/acceptance before promotion.
+The candidate workflow never publishes. Test each architecture before promoting
+a candidate to a release.

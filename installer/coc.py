@@ -19,8 +19,12 @@ from . import InstallerContext
 MARKER = "# Managed by meshcoretomqtt configure-coc\n"
 ARCHES = {"x86_64": ("x86_64", 2, 62), "amd64": ("x86_64", 2, 62),
           "aarch64": ("aarch64", 2, 183), "arm64": ("aarch64", 2, 183),
-          "armv7l": ("armv7", 1, 40)}
+          "armv7l": ("armv7", 1, 40), "armv8l": ("armv7", 1, 40)}
 MAX_HELPER = 32 * 1024 * 1024
+# Wants= (not only After=) so that a host where bluetooth.service is not yet
+# running starts it instead of leaving the bridge in a restart loop.
+DROPIN_BODY = ("[Unit]\nWants=bluetooth.service\nAfter=bluetooth.service\n\n"
+               "[Service]\nRuntimeDirectory=mctomqtt-coc\nRuntimeDirectoryMode=0700\n")
 
 
 def release_asset(version: str, machine: str) -> tuple[str, str]:
@@ -174,6 +178,6 @@ def configure_coc(ctx: InstallerContext, *, address: str, helper: Path, sha256: 
     profile.parent.mkdir(parents=True, exist_ok=True)
     dropin.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(binary, data, 0o755)
-    _atomic_write(dropin, (MARKER + "[Service]\nRuntimeDirectory=mctomqtt-coc\nRuntimeDirectoryMode=0700\n").encode(), 0o644)
+    _atomic_write(dropin, (MARKER + DROPIN_BODY).encode(), 0o644)
     _atomic_write(profile, text.encode(), 0o644)
     return {"helper": binary, "config": profile, "dropin": dropin}

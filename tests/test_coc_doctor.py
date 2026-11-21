@@ -398,7 +398,7 @@ def test_permissions_helper_not_executable_by_service_user_warns():
 # --- end to end -------------------------------------------------------------
 
 UNIT_CMD = ("systemctl", "show", "mctomqtt.service", "-p", "LoadState", "-p", "User", "-p", "Wants",
-            "-p", "Requires", "-p", "BindsTo", "-p", "After", "-p", "RuntimeDirectory")
+            "-p", "Requires", "-p", "BindsTo", "-p", "After", "-p", "RuntimeDirectory", "-p", "NeedDaemonReload")
 
 
 def test_full_run_all_pass_exit_zero(tmp_path):
@@ -451,3 +451,26 @@ def test_cli_does_not_require_root(monkeypatch):
     with pytest.raises(SystemExit) as raised:
         entry.main()
     assert raised.value.code == 7
+
+
+def test_unit_needing_daemon_reload_warns_instead_of_failing():
+    stale = dict(props(UNIT_OK.replace("Wants=network-online.target bluetooth.service", "Wants=")), NeedDaemonReload="yes")
+    r = doc.check_unit_ordering("u.service", stale)
+    assert r.status == WARN and "daemon-reload" in r.hint
+
+
+def test_missing_runtime_directory_warns_until_reload():
+    env = make_env()
+    del env.files["/run/mctomqtt-coc"]
+    p = props(UNIT_OK.replace("RuntimeDirectory=mctomqtt-coc", "RuntimeDirectory=") + "NeedDaemonReload=yes")
+    assert status(doc.check_permissions(env, COC, p, True), "Socket directory") == WARN
+
+
+def test_run_after_setup_prints_report_and_counts_failures(tmp_path):
+    write_cfg(tmp_path, GOOD)
+    out = io.StringIO()
+    env = make_env({UNIT_CMD: UNIT_OK})
+    assert doc.run_after_setup(str(tmp_path), env, out) == 0
+    assert "coc-doctor" in out.getvalue() and "0 failure(s)" in out.getvalue()
+    env = make_env({UNIT_CMD: UNIT_OK, ("bluetoothctl", "info", ADDR): CmdResult(1, f"Device {ADDR} not available\n")})
+    assert doc.run_after_setup(str(tmp_path), env, io.StringIO()) == 1

@@ -57,6 +57,8 @@ def test_configure_preserves_user_brokers_and_clock_policy(tmp_path):
     dropin = result["dropin"].read_text()
     assert "RuntimeDirectory=mctomqtt-coc" in dropin
     assert "RuntimeDirectoryMode=0700" in dropin
+    unit_section = dropin.split("[Service]")[0]
+    assert "Wants=bluetooth.service" in unit_section and "After=bluetooth.service" in unit_section
     assert "ProtectSystem=" not in dropin and "ExecStart=" not in dropin
     assert "User=" not in dropin
 
@@ -180,3 +182,31 @@ def test_helper_packaging_rejects_wrong_architecture_without_output(tmp_path):
                              "--machine", "aarch64", "--output", str(output)], capture_output=True, text=True)
     assert result.returncode != 0
     assert not output.exists()
+
+
+def test_dropin_orders_bluetooth_with_wants_and_after(tmp_path):
+    ctx, units, helper, result, before = configure(tmp_path)
+    lines = result["dropin"].read_text().splitlines()
+    assert lines.index("[Unit]") < lines.index("Wants=bluetooth.service") < lines.index("[Service]")
+    assert "After=bluetooth.service" in lines
+
+
+def test_32bit_userland_on_64bit_arm_kernel_uses_the_armv7_helper():
+    from installer.coc import release_asset
+    assert release_asset("0.1.0", "armv8l")[1] == "observer-coc-helper-armv7"
+
+
+def test_configure_coc_ends_with_the_doctor_report(tmp_path, monkeypatch, capsys):
+    import installer.__main__ as entry
+    from installer import coc, coc_doctor
+    ctx, units, helper, digest = installation(tmp_path)
+    seen = []
+    monkeypatch.setattr(entry, "require_root", lambda: None)
+    monkeypatch.setattr(entry, "InstallerContext", lambda **kw: ctx)
+    monkeypatch.setattr(coc, "configure_coc", lambda *a, **kw: {})
+    monkeypatch.setattr(coc_doctor, "run_after_setup", lambda config_dir: seen.append(config_dir) or 2)
+    monkeypatch.setattr(sys, "argv", ["installer", "configure-coc", "--address", "AA:BB:CC:DD:EE:FF",
+                                       "--helper", str(helper), "--sha256", digest])
+    entry.main()
+    assert seen == [ctx.config_dir]
+    assert "resolve the failures" in capsys.readouterr().out

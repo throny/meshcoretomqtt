@@ -257,7 +257,7 @@ def check_bluetooth_service(env: Env) -> Result:
 
 def _unit_properties(env: Env, unit: str) -> dict[str, str] | None:
     res = env.run(["systemctl", "show", unit, "-p", "LoadState", "-p", "User", "-p", "Wants",
-                   "-p", "Requires", "-p", "BindsTo", "-p", "After", "-p", "RuntimeDirectory"])
+                   "-p", "Requires", "-p", "BindsTo", "-p", "After", "-p", "RuntimeDirectory", "-p", "NeedDaemonReload"])
     if not res.found or res.returncode != 0:
         return None
     props = {}
@@ -275,6 +275,9 @@ def check_unit_ordering(unit: str, props: dict[str, str] | None) -> Result:
                       "Check by hand: systemctl show " + unit + " -p Wants -p After")
     if props.get("LoadState", "not-found") != "loaded":
         return Result(PASS, name, "no systemd unit installed; nothing to check")
+    if props.get("NeedDaemonReload") == "yes":
+        return Result(WARN, name, "the unit files changed on disk and systemd has not reloaded them yet",
+                      "Run: sudo systemctl daemon-reload, then run the doctor again.")
     wants = {dep for key in ("Wants", "Requires", "BindsTo") for dep in props.get(key, "").split()}
     after = set(props.get("After", "").split())
     if "bluetooth.service" not in wants:
@@ -472,6 +475,9 @@ def check_permissions(env: Env, coc: dict, props: dict[str, str] | None, unit_pr
         parent_ok = os.path.dirname(directory) == "/run" and os.path.basename(directory) in runtime
         if parent_ok:
             out.append(Result(PASS, "Socket directory", f"{directory} is created by RuntimeDirectory= when the service starts"))
+        elif unit_present and (props or {}).get("NeedDaemonReload") == "yes":
+            out.append(Result(WARN, "Socket directory", f"{directory} cannot be checked until systemd reloads the unit",
+                              "Run: sudo systemctl daemon-reload, then run the doctor again."))
         elif unit_present:
             out.append(Result(FAIL, "Socket directory",
                               f"{directory} does not exist and the unit has no matching RuntimeDirectory=",
@@ -520,6 +526,15 @@ def format_results(results: list[Result]) -> str:
     counts = {s: sum(1 for r in results if r.status == s) for s in (PASS, WARN, FAIL)}
     lines.append(f"{counts[PASS]} passed, {counts[WARN]} warning(s), {counts[FAIL]} failure(s)")
     return "\n".join(lines)
+
+
+def run_after_setup(config_dir: str, env: Env | None = None, out=None) -> int:
+    """Print the doctor's report at the end of guided setup; return its failure count."""
+    out = out or sys.stdout
+    results = run_checks(env or Env(), Path(config_dir))
+    print("\nChecking the host with coc-doctor:", file=out)
+    print(format_results(results), file=out)
+    return sum(1 for r in results if r.status == FAIL)
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:

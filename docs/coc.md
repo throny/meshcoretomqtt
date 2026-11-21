@@ -19,6 +19,22 @@ using the installer's [custom repository and branch options](../README.md#custom
 Choose the system service on Linux. An existing CoC installation does not need
 to be reinstalled.
 
+## Guided setup
+
+On a native Linux/systemd installation you can let the installer do the next two
+sections. It downloads the helper for your architecture, verifies it against the
+release `SHA256SUMS`, and writes the configuration and service drop-in. Use the
+repeater address you enrolled. Run it from a checkout of this repository:
+
+```sh
+sudo python3 -m installer configure-coc --address AA:BB:CC:DD:EE:FF --helper-version 0.1.0
+```
+
+It does not pair, restart the service or set the clock. When it finishes it runs
+`coc-doctor` (see [Check your setup](#check-your-setup)) and prints the result.
+To use a helper you already have, pass `--helper PATH --sha256 HEX` instead.
+Otherwise continue below.
+
 ## Install the helper
 
 Download the executable for your computer and `SHA256SUMS` from the
@@ -64,9 +80,15 @@ control_socket = "/run/mctomqtt-coc/control.sock"
 ```
 
 The service needs a directory for the helper's sockets. Run
-`sudo systemctl edit mctomqtt.service` and add:
+`sudo systemctl edit mctomqtt.service` and add the following. The `[Unit]`
+lines make systemd start Bluetooth before the bridge. Also run
+`sudo systemctl enable --now bluetooth` so the service starts at boot.
 
 ```ini
+[Unit]
+Wants=bluetooth.service
+After=bluetooth.service
+
 [Service]
 RuntimeDirectory=mctomqtt-coc
 RuntimeDirectoryMode=0700
@@ -97,7 +119,7 @@ first. Set `sync_time = false` if you manage the repeater's time from a Companio
 ## Check your setup
 
 `coc-doctor` checks the host without changing anything and needs no root
-privileges. Run it from a checkout, or from `/opt/mctomqtt` for a service install:
+privileges. Run it from a checkout of this repository:
 
 ```sh
 python3 -m installer coc-doctor

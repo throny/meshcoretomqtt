@@ -102,6 +102,10 @@ def main() -> None:
         print("  sudo systemctl daemon-reload")
         print("  sudo systemctl restart mctomqtt.service")
         print("  journalctl -u mctomqtt.service -n 30 --no-pager")
+        from .coc_doctor import run_after_setup
+        if run_after_setup(ctx.config_dir):
+            print("\nThe files above were written, but resolve the failures before restarting the service.")
+            print("Run 'python3 -m installer coc-doctor' again afterwards.")
 
 
 if __name__ == "__main__":
