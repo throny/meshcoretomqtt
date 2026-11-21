@@ -3,7 +3,8 @@
 Run with ``python3 -m installer coc-doctor``. Nothing here changes system
 state: every external command is a query and goes through one runner function
 (``run_command``) so that tests can replace it. No network access and no root
-privileges are needed; a check that cannot be performed is reported as WARN.
+privileges are required, but some files are only readable by the service user; a check that
+cannot be performed as the current user is reported as WARN.
 """
 from __future__ import annotations
 
@@ -51,6 +52,7 @@ class Result:
     name: str
     message: str
     hint: str = ""
+    perm_skipped: bool = False  # not performed, or not authoritative, because of permissions
 
 
 def run_command(cmd: list[str], timeout: float = 10.0) -> CmdResult:
@@ -91,6 +93,25 @@ def _stat(path: str):
         return None
 
 
+def _access_denied(path: str) -> bool:
+    """True when `path` cannot be inspected because of permissions (not because it is absent)."""
+    try:
+        os.stat(path)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _current_user() -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError, OSError, AttributeError):
+        return os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+
+
 def _lookup_user(name: str):
     """Return (uid, set of gids) for an account, or None."""
     try:
@@ -125,6 +146,8 @@ class Env:
     read_bytes: Callable[[str, int], bytes | None] = _read_bytes
     read_text: Callable[[str], str | None] = _read_text
     stat: Callable[[str], Any] = _stat
+    access_denied: Callable[[str], bool] = _access_denied
+    user: str = field(default_factory=_current_user)
     lookup_user: Callable[[str], Any] = _lookup_user
     can_open_l2cap: Callable[[], tuple[bool, str]] = _can_open_l2cap
     uid: int = field(default_factory=lambda: os.getuid() if hasattr(os, "getuid") else -1)
@@ -145,17 +168,29 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+class ConfigUnreadable(ValueError):
+    """A config file or directory exists but this user may not read it."""
+
+    def __init__(self, path: Any, message: str):
+        super().__init__(message)
+        self.path = str(path)
+
+
 def load_config(config_dir: Path, files: list[str] | None = None) -> tuple[dict, list[Path]]:
     """Merge config.toml and config.d/*.toml. Raises ValueError with the file name."""
     if files:
         paths = [Path(item) for item in files]
     else:
         paths = []
-        if (config_dir / "config.toml").is_file():
-            paths.append(config_dir / "config.toml")
+        base = config_dir / "config.toml"
         drop_in = config_dir / "config.d"
-        if drop_in.is_dir():
-            paths.extend(sorted(drop_in.glob("*.toml")))
+        try:
+            if base.is_file():
+                paths.append(base)
+            if drop_in.is_dir():
+                paths.extend(sorted(drop_in / name for name in os.listdir(drop_in) if name.endswith(".toml")))
+        except PermissionError as exc:
+            raise ConfigUnreadable(exc.filename or config_dir, f"{exc.filename or config_dir}: permission denied") from None
     config: dict = {}
     for path in paths:
         try:
@@ -163,6 +198,8 @@ def load_config(config_dir: Path, files: list[str] | None = None) -> tuple[dict,
                 config = _deep_merge(config, tomllib.load(handle))
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"{path}: {exc}") from None
+        except PermissionError:
+            raise ConfigUnreadable(path, f"{path}: permission denied") from None
         except OSError as exc:
             raise ValueError(f"{path}: {exc.strerror or exc}") from None
     return config, paths
@@ -274,7 +311,8 @@ def check_unit_ordering(unit: str, props: dict[str, str] | None) -> Result:
         return Result(WARN, name, "cannot read the unit (no systemctl); skipped",
                       "Check by hand: systemctl show " + unit + " -p Wants -p After")
     if props.get("LoadState", "not-found") != "loaded":
-        return Result(PASS, name, "no systemd unit installed; nothing to check")
+        return Result(WARN, name, "no systemd unit by this name is installed; if the bridge is not run as a service, "
+                                  "it will not start after a reboot", "Re-run with --unit <name> if the service has another name.")
     if props.get("NeedDaemonReload") == "yes":
         return Result(WARN, name, "the unit files changed on disk and systemd has not reloaded them yet",
                       "Run: sudo systemctl daemon-reload, then run the doctor again.")
@@ -296,6 +334,10 @@ def check_config(env: Env, config_dir: Path, files: list[str] | None) -> tuple[l
     results: list[Result] = []
     try:
         config, paths = load_config(config_dir, files)
+    except ConfigUnreadable as exc:
+        return [Result(WARN, "Config", f"cannot read {exc.path} as user {env.user}; re-run with sudo or as the service user",
+                       "Run: sudo -u <service user> python3 -m installer coc-doctor (or use sudo).",
+                       perm_skipped=True)], None
     except ValueError as exc:
         return [Result(FAIL, "Config", f"does not parse: {exc}", "Fix the TOML syntax in that file.")], None
     if not paths:
@@ -348,12 +390,20 @@ def check_config(env: Env, config_dir: Path, files: list[str] | None) -> tuple[l
 def check_helper(env: Env, helper: str) -> Result:
     name = "Helper binary"
     st = env.stat(helper)
+    if st is None and env.access_denied(helper):
+        return Result(WARN, name, f"cannot inspect {helper} as user {env.user} (a directory on its path is not accessible); "
+                                  "re-run with sudo or as the service user",
+                      "Run: sudo -u <service user> python3 -m installer coc-doctor (or use sudo).", perm_skipped=True)
     if st is None:
         return Result(FAIL, name, f"{helper} does not exist",
                       "Install the helper: python3 -m installer configure-coc ... (see docs/coc.md).")
     if not stat_module.S_ISREG(st.st_mode) or not st.st_mode & 0o111:
         return Result(FAIL, name, f"{helper} is not an executable file", f"Run: sudo chmod 755 {helper}")
-    header = env.read_bytes(helper, 20) or b""
+    header = env.read_bytes(helper, 20)
+    if header is None:
+        return Result(WARN, name, f"cannot read {helper} as user {env.user}; architecture not checked; "
+                                  "re-run with sudo or as the service user",
+                      "Run: sudo -u <service user> python3 -m installer coc-doctor (or use sudo).", perm_skipped=True)
     if len(header) < 20 or header[:4] != b"\x7fELF":
         return Result(FAIL, name, f"{helper} is not an ELF executable", "Reinstall the helper from the release.")
     wanted = ELF_ARCHES.get(env.machine)
@@ -365,15 +415,21 @@ def check_helper(env: Env, helper: str) -> Result:
     if found != wanted:
         return Result(FAIL, name, f"helper is built for a different CPU (ELF machine {found[1]}, host is {env.machine})",
                       "Install the helper asset that matches 'uname -m' (aarch64, armv7 or x86_64).")
-    res = env.run([helper, "--version"])
+    # The helper rejects unknown options with its usage text and exit status 2 before it touches
+    # Bluetooth or any socket, so this is a safe way to prove that the binary starts.
+    res = env.run([helper, "--help"])
     text = (res.stdout + res.stderr).strip()
     if not res.found:
         return Result(FAIL, name, f"helper cannot be executed ({res.stderr.strip()})",
                       "Check the glibc version (2.36 or newer) and the filesystem is not mounted noexec.")
-    version = _version_tuple(text)
-    if version:
-        return Result(PASS, name, "helper runs, version " + ".".join(map(str, version)) + f", architecture {env.machine}")
-    return Result(PASS, name, f"helper runs ({env.machine}); this build reports no version string")
+    if res.returncode < 0:
+        return Result(FAIL, name, f"helper crashed (killed by signal {-res.returncode}) when started",
+                      "Reinstall the helper from the release; check it matches this system.")
+    if res.returncode not in (0, 2) or "usage" not in text.lower():
+        first = text.splitlines()[0] if text else "no output"
+        return Result(FAIL, name, f"helper did not start normally (exit status {res.returncode}: {first})",
+                      "Reinstall the helper from the release; check the glibc version (2.36 or newer).")
+    return Result(PASS, name, f"helper starts and prints its usage text (architecture {env.machine})")
 
 
 def _parse_info(text: str) -> dict[str, str]:
@@ -411,15 +467,20 @@ def check_peer(env: Env, address: str) -> list[Result]:
     return out
 
 
-def check_clock(env: Env, sync_time: bool) -> Result:
+def check_clock(env: Env, sync_time: bool | None) -> Result:
+    """`sync_time` None means the configuration could not be read, so only the host state is reported."""
     name = "System clock"
-    if not sync_time:
+    if sync_time is False:
         return Result(PASS, name, "general.sync_time is off; the host clock is not sent to the repeater")
     res = env.run(["timedatectl", "show", "-p", "NTPSynchronized"])
     if not res.found or res.returncode != 0:
         return Result(WARN, name, "timedatectl unavailable; cannot tell whether the clock is synchronised",
                       "Make sure the host syncs time (for example systemd-timesyncd or chrony).")
     value = res.stdout.strip().partition("=")[2]
+    if value != "yes" and sync_time is None:
+        return Result(WARN, name, "the clock is not synchronised; this matters only if general.sync_time is on "
+                                  "(not known: the configuration could not be read)",
+                      "Run: sudo timedatectl set-ntp true (needs network access to a time server).")
     if value != "yes":
         return Result(WARN, name, "the clock is not synchronised, so the bridge will not set the repeater clock",
                       "Run: sudo timedatectl set-ntp true (needs network access to a time server).")
@@ -437,6 +498,10 @@ def _writable(st: Any, uid: int, gids: set) -> bool:
     return bool(mode & 0o002)
 
 
+def _rerun_hint(user: str) -> str:
+    return f"Run: sudo -u {user or '<service user>'} python3 -m installer coc-doctor (or use sudo)."
+
+
 def check_permissions(env: Env, coc: dict, props: dict[str, str] | None, unit_present: bool) -> list[Result]:
     out: list[Result] = []
     user = (props or {}).get("User") or ""
@@ -447,14 +512,34 @@ def check_permissions(env: Env, coc: dict, props: dict[str, str] | None, unit_pr
     else:
         uid, gids = env.uid, env.gids
         who = "the current user" + (f" (cannot look up service user {user})" if user else "")
+    # The L2CAP test opens a socket as whoever runs the doctor, so it speaks for the service only
+    # when that is the same account.
+    same_user = not user or (account is not None and env.uid == account[0])
     ok, why = env.can_open_l2cap()
-    if ok:
-        out.append(Result(PASS, "L2CAP socket", "a Bluetooth L2CAP socket can be opened (checked as the current user)"))
-    else:
-        out.append(Result(FAIL, "L2CAP socket", f"cannot open a Bluetooth L2CAP socket: {why}",
+    if same_user:
+        if ok:
+            out.append(Result(PASS, "L2CAP socket", "a Bluetooth L2CAP socket can be opened"))
+        else:
+            out.append(Result(FAIL, "L2CAP socket", f"cannot open a Bluetooth L2CAP socket: {why}",
+                              "Load the Bluetooth kernel modules (sudo modprobe bluetooth) and run on a kernel with L2CAP support."))
+    elif env.uid == 0 and not ok:
+        out.append(Result(FAIL, "L2CAP socket", f"cannot open a Bluetooth L2CAP socket even as root: {why}",
                           "Load the Bluetooth kernel modules (sudo modprobe bluetooth) and run on a kernel with L2CAP support."))
+    elif env.uid == 0:
+        out.append(Result(PASS, "L2CAP socket", f"a Bluetooth L2CAP socket can be opened (tested as root, not as {user})"))
+    else:
+        outcome = "can open a socket" if ok else f"cannot open a socket ({why})"
+        out.append(Result(WARN, "L2CAP socket", f"checked as {env.user}, service runs as {user}; re-run with sudo -u {user} "
+                                                f"(as {env.user} this {outcome})", _rerun_hint(user), perm_skipped=True))
     helper = coc.get("helper")
     st = env.stat(helper) if isinstance(helper, str) else None
+    if st is None and isinstance(helper, str):
+        if env.access_denied(helper):
+            out.append(Result(WARN, "Helper access", f"skipped: {helper} cannot be inspected as user {env.user} "
+                              "(a directory on its path is not accessible)", _rerun_hint(user), perm_skipped=True))
+        else:
+            out.append(Result(WARN, "Helper access", f"skipped: {helper} does not exist (see Helper binary)",
+                              "Install the helper first."))
     if st is not None:
         if st.st_uid == uid and st.st_mode & 0o100 or st.st_mode & 0o001 or (st.st_gid in gids and st.st_mode & 0o010):
             out.append(Result(PASS, "Helper access", f"{who} can execute the helper"))
@@ -465,6 +550,10 @@ def check_permissions(env: Env, coc: dict, props: dict[str, str] | None, unit_pr
     runtime = (props or {}).get("RuntimeDirectory", "").split()
     for directory in sock_dirs:
         dst = env.stat(directory)
+        if dst is None and env.access_denied(directory):
+            out.append(Result(WARN, "Socket directory", f"skipped: {directory} cannot be inspected as user {env.user}",
+                              _rerun_hint(user), perm_skipped=True))
+            continue
         if dst is not None:
             if stat_module.S_ISDIR(dst.st_mode) and _writable(dst, uid, gids):
                 out.append(Result(PASS, "Socket directory", f"{directory} is writable by {who}"))
@@ -493,8 +582,39 @@ def check_permissions(env: Env, coc: dict, props: dict[str, str] | None, unit_pr
 # Driver
 # --------------------------------------------------------------------------
 
+def _unit_name_of(header_path: str) -> str:
+    path = Path(header_path)
+    return path.parent.name[:-2] if path.parent.name.endswith(".d") else path.name
+
+
+def find_unit_candidates(env: Env, requested: str, helper: str | None) -> list[str]:
+    """Names of installed services whose ExecStart mentions the bridge or the helper."""
+    listing = env.run(["systemctl", "list-unit-files", "--type=service", "--no-legend", "--no-pager"])
+    if not listing.found:
+        return []
+    names = []
+    for line in listing.stdout.splitlines():
+        parts = line.split()
+        if parts and parts[0].endswith(".service") and not parts[0].endswith("@.service") and parts[0] != requested:
+            names.append(parts[0])
+    if not names:
+        return []
+    needles = ["mctomqtt", "observer-coc-helper"] + ([helper] if helper else [])
+    res = env.run(["systemctl", "cat", "--no-pager"] + names)
+    found: list[str] = []
+    current = None
+    for line in res.stdout.splitlines():
+        if line.startswith("# /"):
+            current = _unit_name_of(line[2:].strip())
+        elif current and line.lstrip().startswith("ExecStart") and any(n in line for n in needles):
+            if current not in found:
+                found.append(current)
+    return sorted(found)
+
+
 def run_checks(env: Env, config_dir: Path = Path(DEFAULT_CONFIG_DIR), unit: str = DEFAULT_UNIT,
-               files: list[str] | None = None) -> list[Result]:
+               files: list[str] | None = None, info: dict | None = None) -> list[Result]:
+    info = info if info is not None else {}
     results = [check_bluez(env)]
     config_results, coc = check_config(env, config_dir, files)
     adapter = (coc or {}).get("adapter") if isinstance((coc or {}).get("adapter"), str) else "hci0"
@@ -503,7 +623,31 @@ def run_checks(env: Env, config_dir: Path = Path(DEFAULT_CONFIG_DIR), unit: str 
     results.append(check_adapter(env, adapter))
     results.append(check_bluetooth_service(env))
     props = _unit_properties(env, unit)
-    results.append(check_unit_ordering(unit, props))
+    unit_used = unit
+    if props is not None and props.get("LoadState", "not-found") != "loaded":
+        helper = (coc or {}).get("helper") if isinstance((coc or {}).get("helper"), str) else None
+        candidates = find_unit_candidates(env, unit, helper)
+        if len(candidates) == 1:
+            unit_used = candidates[0]
+            props = _unit_properties(env, unit_used)
+            ordering = check_unit_ordering(unit_used, props)
+            ordering.message = f"unit {unit_used} picked because no unit is named {unit}; {ordering.message}"
+            results.append(ordering)
+        elif candidates:
+            results.append(Result(WARN, f"{unit} ordering",
+                                  f"no unit is named {unit}; these units run the bridge: {', '.join(candidates)}",
+                                  f"Re-run with --unit <name>, for example --unit {candidates[0]}"))
+            props = None
+        else:
+            results.append(Result(WARN, f"{unit} ordering",
+                                  f"no unit named {unit} and no installed service runs mctomqtt or the helper; "
+                                  "if the bridge is not run as a service it will not start after a reboot",
+                                  "Re-run with --unit <name> if the service has an unusual name."))
+            props = None
+    else:
+        results.append(check_unit_ordering(unit, props))
+    info["unit"] = unit_used
+    info["service_user"] = (props or {}).get("User") or ""
     results.extend(config_results)
     unit_present = bool(props) and props.get("LoadState") == "loaded"
     if coc is not None and not coc.get("invalid"):
@@ -511,29 +655,45 @@ def run_checks(env: Env, config_dir: Path = Path(DEFAULT_CONFIG_DIR), unit: str 
         results.extend(check_peer(env, coc["address"]))
         results.append(check_clock(env, coc["sync_time"]))
         results.extend(check_permissions(env, coc, props if unit_present else None, unit_present))
+    elif any(r.perm_skipped for r in config_results):
+        results.append(check_clock(env, None))
+        results.append(Result(WARN, "Helper, peer, permissions", "skipped because the configuration cannot be read",
+                              _rerun_hint(info["service_user"]), perm_skipped=True))
     else:
         results.append(Result(WARN, "Helper, peer, clock, permissions", "skipped because the configuration is unusable",
                               "Fix the configuration problems above and run again."))
     return results
 
 
-def format_results(results: list[Result]) -> str:
-    lines = []
+def format_header(env: Env, config_dir: Path, unit: str, files: list[str] | None, info: dict | None = None) -> str:
+    shown = ", ".join(files) if files else f"{config_dir}"
+    used = (info or {}).get("unit", unit)
+    unit_text = used if used == unit else f"{used} (requested {unit})"
+    return f"coc-doctor ran as user {env.user}; config: {shown}; unit: {unit_text}"
+
+
+def format_results(results: list[Result], header: str = "") -> str:
+    lines = [header] if header else []
     for item in results:
         lines.append(f"[{item.status}] {item.name}: {item.message}")
         if item.status != PASS and item.hint:
             lines.append(f"       fix: {item.hint}")
     counts = {s: sum(1 for r in results if r.status == s) for s in (PASS, WARN, FAIL)}
     lines.append(f"{counts[PASS]} passed, {counts[WARN]} warning(s), {counts[FAIL]} failure(s)")
+    if any(r.perm_skipped for r in results):
+        lines.append("Some checks were skipped or are not authoritative because of file permissions; "
+                     "re-run with sudo, or as the service user: sudo -u <service user> python3 -m installer coc-doctor")
     return "\n".join(lines)
 
 
 def run_after_setup(config_dir: str, env: Env | None = None, out=None) -> int:
     """Print the doctor's report at the end of guided setup; return its failure count."""
     out = out or sys.stdout
-    results = run_checks(env or Env(), Path(config_dir))
+    env = env or Env()
+    info: dict = {}
+    results = run_checks(env, Path(config_dir), info=info)
     print("\nChecking the host with coc-doctor:", file=out)
-    print(format_results(results), file=out)
+    print(format_results(results, format_header(env, Path(config_dir), DEFAULT_UNIT, None, info)), file=out)
     return sum(1 for r in results if r.status == FAIL)
 
 
@@ -546,8 +706,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace, env: Env | None = None, out=None) -> int:
-    results = run_checks(env or Env(), Path(args.config_dir), args.unit, args.config_files)
-    print(format_results(results), file=out or sys.stdout)
+    env = env or Env()
+    info: dict = {}
+    results = run_checks(env, Path(args.config_dir), args.unit, args.config_files, info)
+    header = format_header(env, Path(args.config_dir), args.unit, args.config_files, info)
+    print(format_results(results, header), file=out or sys.stdout)
     return 1 if any(r.status == FAIL for r in results) else 0
 
 

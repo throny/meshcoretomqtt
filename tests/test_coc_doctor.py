@@ -55,7 +55,7 @@ def make_env(table=None, **kw):
         ("systemctl", "is-enabled", "bluetooth.service"): "enabled\n",
         ("systemctl", "is-active", "bluetooth.service"): "active\n",
         ("timedatectl", "show", "-p", "NTPSynchronized"): "NTPSynchronized=yes\n",
-        (HELPER, "--version"): CmdResult(2, "", "usage: observer-coc-helper --peer ...\n"),
+        (HELPER, "--help"): CmdResult(2, "", "usage: observer-coc-helper --peer ...\n"),
     }
     base.update(table or {})
     runner = Runner(base)
@@ -65,6 +65,8 @@ def make_env(table=None, **kw):
               read_bytes=lambda p, n: elf(183)[:n] if p == HELPER else None,
               read_text=lambda p: None,
               stat=lambda p: files.get(p),
+              access_denied=lambda p: False,
+              user="mctomqtt",
               lookup_user=lambda n: (990, {990}),
               can_open_l2cap=lambda: (True, ""),
               uid=990, gids={990})
@@ -177,7 +179,7 @@ def test_unit_requires_counts_and_missing_after_warns():
 
 
 def test_unit_absent_or_unreadable():
-    assert doc.check_unit_ordering("u.service", {"LoadState": "not-found"}).status == PASS
+    assert doc.check_unit_ordering("u.service", {"LoadState": "not-found"}).status == WARN
     assert doc.check_unit_ordering("u.service", None).status == WARN
 
 
@@ -256,14 +258,45 @@ def test_config_dropins_override_base(tmp_path):
 
 # --- 6. helper --------------------------------------------------------------
 
-def test_helper_pass_without_version_flag():
+def test_helper_pass_when_it_prints_usage():
     r = doc.check_helper(make_env(), HELPER)
     assert r.status == PASS and "aarch64" in r.message
 
 
-def test_helper_prints_version():
-    env = make_env({(HELPER, "--version"): "observer-coc-helper 0.1.0\n"})
-    assert "0.1.0" in doc.check_helper(env, HELPER).message
+def test_helper_is_started_with_an_option_that_cannot_open_bluetooth():
+    env = make_env()
+    doc.check_helper(env, HELPER)
+    assert [HELPER, "--help"] in env.run.calls and [HELPER, "--version"] not in env.run.calls
+
+
+@pytest.mark.parametrize("result", [
+    CmdResult(-11, "", ""),                                            # killed by SIGSEGV
+    CmdResult(127, "", "error while loading shared libraries: libc.so.6"),
+    CmdResult(1, "", "CoC helper stopped (security, discovery, channel, or IPC failure)"),
+    CmdResult(0, "", ""),                                              # started, said nothing
+])
+def test_helper_crash_or_wrong_exit_fails(result):
+    env = make_env({(HELPER, "--help"): result})
+    assert doc.check_helper(env, HELPER).status == FAIL
+
+
+def test_helper_crash_by_signal_is_named():
+    env = make_env({(HELPER, "--help"): CmdResult(-4, "", "")})
+    assert "signal 4" in doc.check_helper(env, HELPER).message
+
+
+def test_helper_parent_directory_not_traversable_warns_not_fails():
+    env = make_env(user="observer")
+    env.stat = lambda p: None
+    env.access_denied = lambda p: p == HELPER
+    r = doc.check_helper(env, HELPER)
+    assert r.status == WARN and "cannot inspect" in r.message and "observer" in r.message
+    assert "sudo" in r.message and r.perm_skipped and "Install" not in r.hint
+
+
+def test_helper_unreadable_header_warns():
+    env = make_env(read_bytes=lambda p, n: None)
+    assert doc.check_helper(env, HELPER).status == WARN
 
 
 def test_helper_missing_fails():
@@ -295,7 +328,7 @@ def test_helper_not_elf_fails():
 
 
 def test_helper_cannot_execute_fails():
-    env = make_env({(HELPER, "--version"): CmdResult(126, "", "permission denied", found=False)})
+    env = make_env({(HELPER, "--help"): CmdResult(126, "", "permission denied", found=False)})
     assert doc.check_helper(env, HELPER).status == FAIL
 
 
@@ -433,7 +466,7 @@ def test_checks_only_issue_read_only_commands(tmp_path):
     doc.run_checks(env, tmp_path)
     allowed = {("bluetoothctl", "--version"), ("bluetoothctl", "show"), ("bluetoothctl", "info"),
                ("systemctl", "is-enabled"), ("systemctl", "is-active"), ("systemctl", "show"),
-               ("timedatectl", "show"), (HELPER, "--version")}
+               ("timedatectl", "show"), (HELPER, "--help")}
     assert {tuple(c[:2]) for c in env.run.calls} <= allowed
 
 
@@ -474,3 +507,256 @@ def test_run_after_setup_prints_report_and_counts_failures(tmp_path):
     assert "coc-doctor" in out.getvalue() and "0 failure(s)" in out.getvalue()
     env = make_env({UNIT_CMD: UNIT_OK, ("bluetoothctl", "info", ADDR): CmdResult(1, f"Device {ADDR} not available\n")})
     assert doc.run_after_setup(str(tmp_path), env, io.StringIO()) == 1
+
+
+# --- unreadable config (permission denied is not a syntax error) ------------------
+
+def test_config_unreadable_is_warn_not_syntax_error(tmp_path):
+    write_cfg(tmp_path, GOOD)
+    target = tmp_path / "config.d" / "99-user.toml"
+    real_open = open
+
+    def deny(path, *a, **k):
+        if str(path) == str(target):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *a, **k)
+
+    import builtins
+    mp = pytest.MonkeyPatch()
+    mp.setattr(builtins, "open", deny)
+    try:
+        results, coc = doc.check_config(make_env(user="observer"), tmp_path, None)
+    finally:
+        mp.undo()
+    assert coc is None and results[0].status == WARN and results[0].perm_skipped
+    assert f"cannot read {target} as user observer" in results[0].message
+    assert "re-run with sudo or as the service user" in results[0].message
+    assert "TOML" not in results[0].message + results[0].hint
+
+
+def test_config_dir_not_listable_is_warn(tmp_path, monkeypatch):
+    write_cfg(tmp_path, GOOD)
+    real = os.listdir
+
+    def deny(path="."):
+        if str(path).endswith("config.d"):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "listdir", deny)
+    results, coc = doc.check_config(make_env(), tmp_path, None)
+    assert coc is None and results[0].status == WARN and results[0].perm_skipped
+
+
+def _unreadable(monkeypatch):
+    def fail(*a, **k):
+        raise doc.ConfigUnreadable("/etc/mctomqtt/config.d/99-user.toml", "x")
+
+    monkeypatch.setattr(doc, "load_config", fail)
+
+
+def test_unreadable_config_still_runs_checks_that_need_no_config(tmp_path, monkeypatch):
+    _unreadable(monkeypatch)
+    env = make_env({UNIT_CMD: UNIT_OK})
+    results = doc.run_checks(env, tmp_path)
+    names = [r.name for r in results]
+    for needed in ("BlueZ", "Adapter hci0", "bluetooth.service", "mctomqtt.service ordering", "System clock"):
+        assert needed in names
+    assert status(results, "Config") == WARN and status(results, "mctomqtt.service ordering") == PASS
+    assert not any(r.status == FAIL for r in results)
+    assert not any(c[:2] == ["bluetoothctl", "info"] for c in env.run.calls)
+    assert any(r.perm_skipped and "cannot be read" in r.message for r in results)
+
+
+def test_unreadable_config_clock_does_not_assume_sync_time(tmp_path, monkeypatch):
+    _unreadable(monkeypatch)
+    env = make_env({("timedatectl", "show", "-p", "NTPSynchronized"): "NTPSynchronized=no\n"})
+    clock = [r for r in doc.run_checks(env, tmp_path) if r.name == "System clock"][0]
+    assert clock.status == WARN and "sync_time" in clock.message
+
+
+# --- unit discovery -----------------------------------------------------------------
+
+LIST_CMD = ("systemctl", "list-unit-files", "--type=service", "--no-legend", "--no-pager")
+OTHER_UNIT = "meshcore-observer.service"
+SHOW_FIELDS = ("-p", "LoadState", "-p", "User", "-p", "Wants", "-p", "Requires", "-p", "BindsTo", "-p", "After",
+               "-p", "RuntimeDirectory", "-p", "NeedDaemonReload")
+OTHER_CMD = ("systemctl", "show", OTHER_UNIT) + SHOW_FIELDS
+NOT_FOUND = "LoadState=not-found\nUser=\nWants=\nRequires=\nBindsTo=\nAfter=\nRuntimeDirectory=\nNeedDaemonReload=no\n"
+LISTING = ("bluetooth.service enabled enabled\ncron.service enabled enabled\n"
+           "meshcore-observer.service enabled enabled\ngetty@.service enabled enabled\n")
+
+
+def cat_text(*units):
+    return "\n".join(f"# /etc/systemd/system/{name}\n[Service]\nExecStart={line}\n" for name, line in units)
+
+
+CAT_CMD = ("systemctl", "cat", "--no-pager", "bluetooth.service", "cron.service", OTHER_UNIT)
+CAT_ONE = cat_text(("bluetooth.service", "/usr/libexec/bluetooth/bluetoothd"),
+                   ("cron.service", "/usr/sbin/cron -f"),
+                   (OTHER_UNIT, "/opt/bridge/venv/bin/python /opt/bridge/mctomqtt.py --config /etc/x.toml"))
+
+
+def unit_table(extra=None):
+    table = {UNIT_CMD: NOT_FOUND, LIST_CMD: LISTING, CAT_CMD: CAT_ONE,
+             OTHER_CMD: UNIT_OK.replace("mctomqtt", "observer")}
+    table.update(extra or {})
+    return table
+
+
+def test_wrong_unit_name_picks_the_single_obvious_candidate(tmp_path):
+    write_cfg(tmp_path, GOOD)
+    out = io.StringIO()
+    env = make_env(unit_table())
+    args = argparse.Namespace(config_dir=str(tmp_path), unit="mctomqtt.service", config_files=None)
+    doc.run(args, env, out)
+    text = out.getvalue()
+    assert "no systemd unit installed" not in text
+    assert f"unit {OTHER_UNIT} picked because no unit is named mctomqtt.service" in text
+    assert f"[PASS] {OTHER_UNIT} ordering" in text
+    assert f"unit: {OTHER_UNIT} (requested mctomqtt.service)" in text.splitlines()[0]
+
+
+def test_wrong_unit_name_uses_service_user_of_the_picked_unit(tmp_path):
+    write_cfg(tmp_path, GOOD)
+    env = make_env(unit_table())
+    env.lookup_user = lambda n: (990, {990}) if n == "observer" else None
+    results = doc.run_checks(env, tmp_path)
+    assert "service user observer" in [r for r in results if r.name == "Helper access"][0].message
+
+
+def test_wrong_unit_name_with_several_candidates_warns_and_lists_them(tmp_path):
+    write_cfg(tmp_path, GOOD)
+    listing = LISTING + "second-bridge.service enabled enabled\n"
+    cat_cmd = CAT_CMD + ("second-bridge.service",)
+    cat = CAT_ONE + "\n" + cat_text(("second-bridge.service", "/usr/bin/python3 /srv/mctomqtt.py"))
+    env = make_env(unit_table({LIST_CMD: listing, cat_cmd: cat}))
+    results = doc.run_checks(env, tmp_path)
+    r = [x for x in results if x.name == "mctomqtt.service ordering"][0]
+    assert r.status == WARN and OTHER_UNIT in r.message and "second-bridge.service" in r.message
+    assert "--unit" in r.hint
+
+
+def test_candidate_found_through_helper_path_in_exec_start():
+    cat = cat_text(("bluetooth.service", "/usr/libexec/bluetooth/bluetoothd"), ("cron.service", "/usr/sbin/cron"),
+                   (OTHER_UNIT, f"{HELPER} --test-mode"))
+    env = make_env(unit_table({CAT_CMD: cat}))
+    assert doc.find_unit_candidates(env, "mctomqtt.service", HELPER) == [OTHER_UNIT]
+
+
+def test_dropin_headers_do_not_create_extra_candidates():
+    cat = (cat_text((OTHER_UNIT, "/opt/mctomqtt.py")) +
+           "\n# /etc/systemd/system/meshcore-observer.service.d/override.conf\n[Service]\n"
+           "ExecStart=\nExecStart=/opt/mctomqtt.py\n")
+    env = make_env(unit_table({CAT_CMD: cat}))
+    assert doc.find_unit_candidates(env, "mctomqtt.service", None) == [OTHER_UNIT]
+
+
+def test_no_unit_anywhere_is_warn_information_not_pass(tmp_path):
+    write_cfg(tmp_path, GOOD)
+    cat = cat_text(("bluetooth.service", "/usr/libexec/bluetooth/bluetoothd"), ("cron.service", "/usr/sbin/cron"),
+                   (OTHER_UNIT, "/usr/bin/other-daemon"))
+    env = make_env(unit_table({CAT_CMD: cat}))
+    results = doc.run_checks(env, tmp_path)
+    r = [x for x in results if x.name == "mctomqtt.service ordering"][0]
+    assert r.status == WARN and "not run as a service" in r.message
+
+
+def test_requested_unit_that_exists_is_not_searched_for_candidates(tmp_path):
+    write_cfg(tmp_path, GOOD)
+    env = make_env({UNIT_CMD: UNIT_OK})
+    doc.run_checks(env, tmp_path)
+    assert not any(c[:2] == ["systemctl", "list-unit-files"] for c in env.run.calls)
+
+
+# --- permissions as the wrong user ----------------------------------------------------
+
+def test_other_user_gets_warning_instead_of_authoritative_l2cap_verdict():
+    env = make_env(uid=1001, gids={1001}, user="observer")
+    r = [x for x in doc.check_permissions(env, COC, props(UNIT_OK), True) if x.name == "L2CAP socket"][0]
+    assert r.status == WARN and r.perm_skipped
+    assert "checked as observer, service runs as mctomqtt; re-run with sudo -u mctomqtt" in r.message
+
+
+def test_other_user_failure_is_also_only_a_warning():
+    env = make_env(uid=1001, gids={1001}, user="observer", can_open_l2cap=lambda: (False, "Operation not permitted"))
+    r = [x for x in doc.check_permissions(env, COC, props(UNIT_OK), True) if x.name == "L2CAP socket"][0]
+    assert r.status == WARN and "Operation not permitted" in r.message
+
+
+def test_other_user_still_checks_modes_against_service_user():
+    env = make_env(uid=1001, gids={1001}, user="observer")
+    env.files[HELPER] = st(0o100750, 0, 990)
+    r = doc.check_permissions(env, COC, props(UNIT_OK), True)
+    assert status(r, "Helper access") == PASS and status(r, "Socket directory") == PASS
+
+
+def test_root_checks_modes_against_service_user_not_root():
+    env = make_env(uid=0, gids={0}, user="root")
+    env.files["/run/mctomqtt-coc"] = st(0o040755, 0, 0)   # root could write here, the service user cannot
+    env.files[HELPER] = st(0o100750, 0, 0)                # no execute bit for the service user
+    r = doc.check_permissions(env, COC, props(UNIT_OK), True)
+    assert status(r, "Socket directory") == FAIL and status(r, "Helper access") == WARN
+    l2cap = [x for x in r if x.name == "L2CAP socket"][0]
+    assert l2cap.status == PASS and "as root, not as mctomqtt" in l2cap.message
+
+
+def test_root_l2cap_failure_fails():
+    env = make_env(uid=0, gids={0}, user="root", can_open_l2cap=lambda: (False, "Operation not permitted"))
+    assert status(doc.check_permissions(env, COC, props(UNIT_OK), True), "L2CAP socket") == FAIL
+
+
+def test_service_user_run_is_authoritative():
+    r = doc.check_permissions(make_env(), COC, props(UNIT_OK), True)
+    assert status(r, "L2CAP socket") == PASS and not any(x.perm_skipped for x in r)
+
+
+def test_no_unit_means_current_user_is_checked_without_warning():
+    assert status(doc.check_permissions(make_env(), COC, None, False), "L2CAP socket") == PASS
+
+
+# --- helper access is never silently omitted --------------------------------------------
+
+def test_helper_access_reports_skip_when_helper_not_inspectable():
+    env = make_env(uid=1001, gids={1001}, user="observer")
+    env.stat = lambda p: None if p == HELPER else st(0o040700, 990, 990)
+    env.access_denied = lambda p: p == HELPER
+    r = [x for x in doc.check_permissions(env, COC, props(UNIT_OK), True) if x.name == "Helper access"]
+    assert len(r) == 1 and r[0].status == WARN and r[0].perm_skipped and "skipped" in r[0].message
+    assert "sudo -u mctomqtt" in r[0].hint
+
+
+def test_helper_access_reports_skip_when_helper_missing():
+    env = make_env()
+    env.stat = lambda p: None if p == HELPER else st(0o040700, 990, 990)
+    r = [x for x in doc.check_permissions(env, COC, props(UNIT_OK), True) if x.name == "Helper access"]
+    assert len(r) == 1 and "does not exist" in r[0].message and not r[0].perm_skipped
+
+
+def test_socket_directory_not_inspectable_is_warning():
+    env = make_env(uid=1001, gids={1001}, user="observer")
+    env.files.pop("/run/mctomqtt-coc")
+    env.access_denied = lambda p: p == "/run/mctomqtt-coc"
+    assert status(doc.check_permissions(env, COC, props(UNIT_OK), True), "Socket directory") == WARN
+
+
+# --- report header and hint --------------------------------------------------------------
+
+def test_report_header_names_user_config_and_unit(tmp_path):
+    write_cfg(tmp_path, GOOD)
+    env = make_env({UNIT_CMD: UNIT_OK}, user="observer")
+    out = io.StringIO()
+    doc.run(argparse.Namespace(config_dir=str(tmp_path), unit="mctomqtt.service", config_files=None), env, out)
+    first = out.getvalue().splitlines()[0]
+    assert "ran as user observer" in first and str(tmp_path) in first and "unit: mctomqtt.service" in first
+
+
+def test_report_header_lists_explicit_config_files(tmp_path):
+    header = doc.format_header(make_env(), tmp_path, "u.service", ["/a/one.toml", "/a/two.toml"])
+    assert "/a/one.toml, /a/two.toml" in header
+
+
+def test_final_hint_only_when_something_was_skipped_for_permissions():
+    assert "file permissions" not in doc.format_results([doc.Result(PASS, "x", "fine")])
+    loud = doc.format_results([doc.Result(WARN, "x", "skipped", perm_skipped=True)])
+    assert loud.splitlines()[-1].startswith("Some checks were skipped") and "sudo -u" in loud

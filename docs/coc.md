@@ -118,12 +118,22 @@ first. Set `sync_time = false` if you manage the repeater's time from a Companio
 
 ## Check your setup
 
-`coc-doctor` checks the host without changing anything and needs no root
-privileges. Run it from a checkout of this repository:
+`coc-doctor` checks the host without changing anything. Run it from a checkout
+of this repository, as the service user or with sudo, because the configuration
+and the helper's directory are usually readable only by that account:
 
 ```sh
-python3 -m installer coc-doctor
+sudo -u <service user> python3 -m installer coc-doctor --unit <your unit>.service
 ```
+
+`sudo python3 -m installer coc-doctor` works too; it then checks file modes
+against the service user named in the unit. Run as any other user, the doctor
+still works but reports `WARN` for what it could not read or test as the
+service user, and ends with a hint to re-run. The first line of the report says
+which user, configuration and unit were examined. If no unit has the default
+name `mctomqtt.service`, the doctor looks for services that run `mctomqtt` or
+the helper; it uses a single match, or lists the matches so you can pass
+`--unit <name>`.
 
 It prints `PASS`, `WARN` or `FAIL` for each item with a one-line fix, and exits
 with a non-zero status if anything failed. It checks BlueZ (5.72 or newer is
