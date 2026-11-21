@@ -126,6 +126,14 @@ def _connect_device(state: BridgeState, transport_factory, *, time_sync_wait=Non
     return state.device
 
 
+def _reconnect_device(state: BridgeState, transport_factory):
+    """Reconnect the runtime transport and request a fresh stats poll."""
+    device = _connect_device(state, transport_factory)
+    if device:
+        state.device_stats_refresh_event.set()
+    return device
+
+
 def run(state: BridgeState, *, transport_factory=None) -> None:
     """Main orchestration: connect serial, query device, connect MQTT, read loop."""
     stats_thread = threading.Thread(
@@ -261,7 +269,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory) 
                     if not state.device.is_open:
                         logger.warning("Device transport disconnected, reconnecting")
                         state.device.close()
-                        state.device = _connect_device(state, transport_factory)
+                        state.device = _reconnect_device(state, transport_factory)
                         sleep(0.5)
                         continue
                     if process_device_line(state):
@@ -276,7 +284,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory) 
                                 f"(threshold: {watchdog_timeout}s), forcing reconnect"
                             )
                         state.device.close()
-                        state.device = _connect_device(state, transport_factory)
+                        state.device = _reconnect_device(state, transport_factory)
                         if state.device:
                             logger.info("%s watchdog: reconnected successfully", transport_label)
                             watchdog_logged = False
@@ -288,7 +296,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory) 
                     now = time.time()
                     if now - last_reconnect_attempt >= reconnect_interval:
                         last_reconnect_attempt = now
-                        state.device = _connect_device(state, transport_factory)
+                        state.device = _reconnect_device(state, transport_factory)
                         if state.device:
                             logger.info("%s reconnected successfully", transport_label)
                             watchdog_logged = False
@@ -301,7 +309,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory) 
                 logger.warning("%s connection unavailable, trying to reconnect", transport_label)
                 if state.device:
                     state.device.close()
-                state.device = _connect_device(state, transport_factory)
+                state.device = _reconnect_device(state, transport_factory)
                 sleep(0.5)
 
             sleep(0.01)
@@ -316,6 +324,7 @@ def _cleanup(state: BridgeState, stats_thread: threading.Thread) -> None:
     """Shut down background threads, publish offline status, and close connections."""
     logger.info("Cleaning up...")
     state.should_exit = True
+    state.device_stats_refresh_event.set()
 
     # Stop WebSocket ping threads
     if state.mqtt_manager:
