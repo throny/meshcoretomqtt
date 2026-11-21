@@ -27,11 +27,19 @@ def main() -> None:
 
     sub.add_parser("migrate", help="Migrate legacy ~/.meshcoretomqtt installation")
 
+    doctor_p = sub.add_parser("coc-doctor", help="Read-only check of the Bluetooth (CoC) setup; no root needed")
+    from .coc_doctor import add_arguments as add_doctor_arguments
+    add_doctor_arguments(doctor_p)
+
     args: argparse.Namespace = parser.parse_args()
 
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    if args.command == "coc-doctor":
+        from .coc_doctor import run as run_doctor
+        sys.exit(run_doctor(args))
 
     require_root()
 

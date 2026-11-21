@@ -94,6 +94,25 @@ With `general.sync_time = true`, meshcoretomqtt sets the repeater's clock from
 the Linux host when it connects. The host must have synchronized its own clock
 first. Set `sync_time = false` if you manage the repeater's time from a Companion.
 
+## Check your setup
+
+`coc-doctor` checks the host without changing anything and needs no root
+privileges. Run it from a checkout, or from `/opt/mctomqtt` for a service install:
+
+```sh
+python3 -m installer coc-doctor
+```
+
+It prints `PASS`, `WARN` or `FAIL` for each item with a one-line fix, and exits
+with a non-zero status if anything failed. It checks BlueZ (5.72 or newer is
+recommended; older releases crashed in field use), the adapter, that
+`bluetooth.service` is enabled and running, that the bridge's unit has
+`Wants=bluetooth.service` and not only `After=`, the configuration, the helper
+binary, whether the repeater is paired, bonded and trusted, the host clock when
+`sync_time` is on, and the permissions the helper needs. Use `--config-dir` or
+`--unit` if your paths differ from the defaults. A check that cannot run on your
+system is reported as a warning.
+
 ## Troubleshooting
 
 - **The helper does not start:** check the executable path, architecture and OS
